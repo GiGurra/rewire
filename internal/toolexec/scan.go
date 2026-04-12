@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // mockTargets maps import path → list of function names to mock.
@@ -17,13 +18,29 @@ type mockTargets map[string][]string
 
 // loadOrScanMockTargets returns the set of functions that need to be mocked,
 // as declared by rewire.Func calls in test files across the module.
-// Results are cached per parent process to avoid rescanning on every
-// toolexec invocation within the same build.
+//
+// Results are cached per build session (keyed on parent PID). A file lock
+// ensures only one toolexec process scans; others block until the cache
+// is ready.
 func loadOrScanMockTargets(moduleRoot string) mockTargets {
 	cacheDir := filepath.Join(os.TempDir(), fmt.Sprintf("rewire-%d", os.Getppid()))
 	cacheFile := filepath.Join(cacheDir, "mock_targets.json")
+	lockFile := filepath.Join(cacheDir, "mock_targets.lock")
 
-	// Try reading cached result first
+	os.MkdirAll(cacheDir, 0755)
+
+	// Acquire file lock — first process scans, others wait
+	lock, err := os.Create(lockFile)
+	if err != nil {
+		// Can't create lock — fall back to scanning without lock
+		return scanAllTestFiles(moduleRoot)
+	}
+	defer lock.Close()
+
+	syscall.Flock(int(lock.Fd()), syscall.LOCK_EX)
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+
+	// Under lock: check if cache was written by another process
 	if data, err := os.ReadFile(cacheFile); err == nil {
 		var targets mockTargets
 		if json.Unmarshal(data, &targets) == nil {
@@ -31,11 +48,9 @@ func loadOrScanMockTargets(moduleRoot string) mockTargets {
 		}
 	}
 
-	// Scan all test files in the module
+	// We're the first — scan and write cache
 	targets := scanAllTestFiles(moduleRoot)
 
-	// Cache for subsequent invocations in this build
-	os.MkdirAll(cacheDir, 0755)
 	if data, err := json.Marshal(targets); err == nil {
 		os.WriteFile(cacheFile, data, 0644)
 	}
