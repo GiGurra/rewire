@@ -38,6 +38,12 @@ func TestWelcome_WithMock(t *testing.T) {
 }
 ```
 
+## About this project
+
+This project is 100% vibe coded — AST rewriting and compiler toolchains are way outside my comfort zone. Built entirely with [Claude Code](https://claude.ai/claude-code).
+
+Inspired by Erlang's [meck](https://github.com/eproxus/meck), although the mechanism is entirely different.
+
 ## Next steps
 
 - [Getting Started](getting-started.md) — install and run your first mock
