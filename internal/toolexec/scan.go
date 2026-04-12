@@ -10,7 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
+
+	"github.com/gofrs/flock"
 )
 
 // mockTargets maps import path → list of function names to mock.
@@ -25,20 +26,17 @@ type mockTargets map[string][]string
 func loadOrScanMockTargets(moduleRoot string) mockTargets {
 	cacheDir := filepath.Join(os.TempDir(), fmt.Sprintf("rewire-%d", os.Getppid()))
 	cacheFile := filepath.Join(cacheDir, "mock_targets.json")
-	lockFile := filepath.Join(cacheDir, "mock_targets.lock")
+	lockPath := filepath.Join(cacheDir, "mock_targets.lock")
 
 	os.MkdirAll(cacheDir, 0755)
 
 	// Acquire file lock — first process scans, others wait
-	lock, err := os.Create(lockFile)
-	if err != nil {
-		// Can't create lock — fall back to scanning without lock
+	fl := flock.New(lockPath)
+	if err := fl.Lock(); err != nil {
+		// Can't acquire lock — fall back to scanning without lock
 		return scanAllTestFiles(moduleRoot)
 	}
-	defer lock.Close()
-
-	syscall.Flock(int(lock.Fd()), syscall.LOCK_EX)
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	defer fl.Unlock()
 
 	// Under lock: check if cache was written by another process
 	if data, err := os.ReadFile(cacheFile); err == nil {
