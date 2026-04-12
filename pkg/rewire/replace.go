@@ -1,6 +1,7 @@
 package rewire
 
 import (
+	"os"
 	"reflect"
 	"runtime"
 	"sync"
@@ -32,7 +33,15 @@ func Func[F any](t *testing.T, original F, replacement F) {
 
 	mockPtrAny, ok := registry.Load(name)
 	if !ok {
-		t.Fatalf("rewire.Func: %s is not registered — is -toolexec=rewire active?", name)
+		goflags := os.Getenv("GOFLAGS")
+		if goflags == "" {
+			goflags = "(not set)"
+		}
+		t.Fatalf("rewire.Func: %s is not registered.\n"+
+			"  GOFLAGS=%s\n"+
+			"  To fix: ensure GOFLAGS contains -toolexec=rewire\n"+
+			"  If you recently changed GOFLAGS, run: go clean -cache",
+			name, goflags)
 	}
 
 	ptrVal := reflect.ValueOf(mockPtrAny)
