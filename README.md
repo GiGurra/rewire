@@ -133,7 +133,7 @@ If you don't mind the minimal overhead (a nil check per mocked function in produ
 export GOFLAGS="-toolexec=rewire"
 ```
 
-This is simpler but means `go build` also rewrites targeted functions. The overhead is negligible — only functions you explicitly mock are affected, and the nil check is ~0 cost.
+This is simpler but means `go build` also rewrites targeted functions. The overhead is probably negligible in most situations — only functions you explicitly mock are affected, and it's just a nil check.
 
 ## Test isolation
 
