@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/GiGurra/rewire/internal/rewriter"
@@ -31,8 +32,11 @@ func Run(args []string) int {
 	tool := args[0]
 	toolArgs := args[1:]
 
-	// Only intercept the compile tool
+	// Only intercept the compile tool during test builds
 	if !isCompileTool(tool) {
+		return execTool(tool, toolArgs)
+	}
+	if !isGoTestBuild() {
 		return execTool(tool, toolArgs)
 	}
 
@@ -57,6 +61,23 @@ func Run(args []string) int {
 	}
 
 	return execTool(tool, rewrittenArgs)
+}
+
+// isGoTestBuild checks if the parent process is 'go test', meaning we're
+// compiling as part of a test build. This ensures rewire is a no-op during
+// 'go build', 'go install', and other non-test commands.
+func isGoTestBuild() bool {
+	ppid := os.Getppid()
+	out, err := exec.Command("ps", "-p", strconv.Itoa(ppid), "-o", "args=").Output()
+	if err != nil {
+		return false // can't determine — safe default is don't rewrite
+	}
+	args := strings.Fields(strings.TrimSpace(string(out)))
+	if len(args) < 2 {
+		return false
+	}
+	// args[0] is the go binary (e.g. /usr/local/go/bin/go), args[1] is the subcommand
+	return args[1] == "test"
 }
 
 func isCompileTool(tool string) bool {
