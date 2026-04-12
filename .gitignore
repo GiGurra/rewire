@@ -2,6 +2,9 @@
 .idea/
 .vscode/
 
+# Claude Code
+.claude/
+
 # Go
 /rewire
 *.exe
