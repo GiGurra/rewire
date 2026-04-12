@@ -37,10 +37,12 @@ func Func[F any](t *testing.T, original F, replacement F) {
 		if goflags == "" {
 			goflags = "(not set)"
 		}
-		t.Fatalf("rewire.Func: %s is not registered.\n"+
-			"  GOFLAGS=%s\n"+
-			"  To fix: ensure GOFLAGS contains -toolexec=rewire\n"+
-			"  If you recently changed GOFLAGS, run: go clean -cache",
+		t.Fatalf("rewire: function %s cannot be mocked — toolexec rewriting is not active.\n"+
+			"  Current GOFLAGS=%s\n"+
+			"  To fix:\n"+
+			"    1. Set GOFLAGS to include -toolexec=rewire (e.g. export GOFLAGS=\"-toolexec=rewire\")\n"+
+			"    2. Run: go clean -cache\n"+
+			"    3. Re-run your tests",
 			name, goflags)
 	}
 
