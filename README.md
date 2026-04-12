@@ -181,9 +181,12 @@ example/                 End-to-end examples (same-module + stdlib mocking)
 docs/                    Design docs and decision log
 ```
 
+## Acknowledgements
+
+This project is 100% vibe coded — AST rewriting and compiler toolchains are way outside my comfort zone. Built entirely with [Claude Code](https://claude.ai/claude-code).
+
+Inspired by Erlang's [meck](https://github.com/eproxus/meck), although the mechanism is entirely different.
+
 ## License
 
 MIT
-
-
-Inspired by Erlang's [meck](https://github.com/eproxus/meck), although the mechanism we rely on is entirely different.
