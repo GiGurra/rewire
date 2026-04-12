@@ -172,17 +172,31 @@ Within a test package, `rewire.Func` uses `t.Cleanup` to restore the mock variab
 
 **Why replaced**: Slow for large packages, broke stdlib packages (compiler directives, variable shadowing), prevented external package mocking. Replaced by targeted rewriting based on pre-scanning test files.
 
+## Interface mock generation
+
+In addition to compile-time function rewriting, rewire also generates mock structs for Go interfaces via `rewire mock`. This is standard code generation (not toolexec) — the generated files are committed to the repo and work with `go:generate`.
+
+This covers the "dependency injection" side of mocking: when you have an interface and want to pass in a mock implementation. Combined with `rewire.Func` for compile-time function/method replacement, rewire is a complete mocking solution — no need for a second mocking library.
+
+### Design choices
+
+- **Codegen over toolexec**: Interface mocks are generated files, not compile-time artifacts. This gives full IDE support (gopls sees the types), reviewable diffs, and follows standard Go patterns (`go:generate`).
+- **Function fields**: Each method becomes a function field (`GetFunc`, `SetFunc`). Unset fields return zero values via named return parameters and bare `return`.
+- **Only direct methods**: Embedded interfaces are not resolved — only methods directly declared on the interface are generated. This keeps the generator simple and avoids cross-package type resolution.
+
+## Implemented features
+
+### Method support
+
+Methods use `(*Type).Method` or `Type.Method` syntax, matching Go method expressions and `runtime.FuncForPC` naming conventions. The rewriter generates a mock variable with the receiver as the first parameter (`Mock_Server_Handle func(*Server, string) string`), a wrapper method that forwards the receiver to the mock, and a `_real_` method that preserves the original body. The scanner detects both pointer receiver (`(*pkg.Type).Method`) and value receiver (`pkg.Type.Method`) patterns in test files.
+
+Method mocks are global — all instances of a type share one mock variable. Per-instance mocking would require a map lookup on every call and a different API; for per-instance behavior, Go interfaces are the idiomatic approach.
+
 ## Future work
 
 ### gopls integration via -overlay
 
 Generate an overlay JSON file mapping source files to rewritten versions. `gopls` would see mock variables and provide autocomplete. A `rewire daemon` could keep the overlay in sync.
-
-### Method support (implemented)
-
-Methods use `(*Type).Method` or `Type.Method` syntax, matching Go method expressions and `runtime.FuncForPC` naming conventions. The rewriter generates a mock variable with the receiver as the first parameter (`Mock_Server_Handle func(*Server, string) string`), a wrapper method that forwards the receiver to the mock, and a `_real_` method that preserves the original body. The scanner detects both pointer receiver (`(*pkg.Type).Method`) and value receiver (`pkg.Type.Method`) patterns in test files.
-
-Method mocks are global — all instances of a type share one mock variable. Per-instance mocking would require a map lookup on every call and a different API; for per-instance behavior, Go interfaces are the idiomatic approach.
 
 ### Generic function support
 

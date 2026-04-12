@@ -2,9 +2,12 @@
 
 > **Experimental** — this project is in early development. Both the implementation and APIs may change at any time. Use at your own risk.
 
-Compile-time function mocking for Go. Replace any function during tests — no manual code generation commands, no interfaces, no dependency injection, no unsafe runtime patches.
+A complete mocking solution for Go:
 
-Production source stays **100% clean**. Rewire intercepts the Go compiler via `-toolexec`, scans your test files, and rewrites specific function calls on the fly before passing it to the compiler. Source on disk is never modified.
+- **Replace any function or method at test time** — package-level functions, struct methods, stdlib, third-party. No interfaces, no dependency injection, no unsafe runtime patches. This is what other mocking libraries can't do.
+- **Generate mock structs for interfaces** — for traditional dependency-injection style testing, like other Go mocking libraries.
+
+One tool, both approaches. Production source stays **100% clean** — rewire intercepts the Go compiler via `-toolexec` and rewrites only the specific functions you mock. Source on disk is never modified.
 
 ## Quick start
 
@@ -15,11 +18,13 @@ go install github.com/GiGurra/rewire/cmd/rewire@latest
 # Clean the Go build cache (needed once, so rewire can rewrite cached packages)
 go clean -cache
 
-# Run tests with rewire
+# Run tests with rewire (for function/method mocking)
 GOFLAGS="-toolexec=rewire" go test ./...
 ```
 
-## Usage
+## Function mocking (toolexec)
+
+Replace any function at test time — no code changes required.
 
 Given production code:
 
@@ -87,6 +92,62 @@ func TestSquareRoot(t *testing.T) {
     // math.Pow now returns 42 in this test
 }
 ```
+
+## Interface mock generation
+
+For interfaces you pass in (dependency injection), rewire generates lightweight mock structs:
+
+```bash
+rewire mock -f bar.go -i Store -p foo -o mock_store_test.go
+```
+
+This generates a struct with function fields for each method:
+
+```go
+type MockStore struct {
+    GetFunc    func(key string) (string, error)
+    SetFunc    func(key string, value string) error
+    DeleteFunc func(key string) error
+}
+
+func (m *MockStore) Get(key string) (_r0 string, _r1 error) {
+    if m.GetFunc != nil {
+        return m.GetFunc(key)
+    }
+    return // zero values
+}
+// ...
+```
+
+Use in tests:
+
+```go
+func TestGetOrDefault(t *testing.T) {
+    mock := &MockStore{
+        GetFunc: func(key string) (string, error) {
+            return "value", nil
+        },
+    }
+    got := GetOrDefault(mock, "key", "default")
+    // got == "value"
+}
+```
+
+### go:generate workflow
+
+Add directives to your test files and regenerate with `go generate`:
+
+```go
+//go:generate rewire mock -f ../bar/interfaces.go -i Store -p foo -o mock_store_test.go
+//go:generate rewire mock -f ../bar/interfaces.go -i Logger -p foo -o mock_logger_test.go
+```
+
+```bash
+go generate ./...   # regenerate mocks
+go test ./...       # run tests
+```
+
+Handles imported types (`context.Context`, `*http.Request`, `io.Reader`, etc.), variadic parameters, unnamed parameters, and multiple return values.
 
 ## How it works
 
@@ -169,17 +230,6 @@ Within a test package, `rewire.Func` uses `t.Cleanup` to restore the original af
 - **No generics** — generic functions are skipped
 - **No parallel mock safety** — parallel tests in the same package should not mock the same function with different replacements
 - **Bodyless functions** — functions implemented in assembly (no Go body) cannot be rewritten
-
-## Project structure
-
-```
-cmd/rewire/              CLI entry point (toolexec mode + rewrite subcommand)
-pkg/rewire/              Test helper library (Func and Replace)
-internal/rewriter/       AST-based source rewriter
-internal/toolexec/       Toolexec wrapper, test file scanner, intrinsic detection
-example/                 End-to-end examples (same-module + stdlib mocking)
-docs/                    Design docs and decision log
-```
 
 ## Acknowledgements
 
