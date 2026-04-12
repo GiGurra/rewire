@@ -2,7 +2,7 @@
 
 > **Experimental** — this project is in early development. Both the implementation and APIs may change at any time. Use at your own risk.
 
-Compile-time function mocking for Go. Replace any function during tests — no interfaces, no dependency injection, no unsafe runtime patches.
+Compile-time function mocking for Go. Replace any function during tests — no manual code generation commands, no interfaces, no dependency injection, no unsafe runtime patches.
 
 Production source stays **100% clean**. Rewire intercepts the Go compiler via `-toolexec`, scans your test files, and rewrites specific function calls on the fly before passing it to the compiler. Source on disk is never modified.
 
