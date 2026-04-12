@@ -8,7 +8,7 @@ import (
 )
 
 func TestWelcome_WithMock(t *testing.T) {
-	rewire.Replace(t, &bar.Mock_Greet, func(name string) string {
+	rewire.Func(t, bar.Greet, func(name string) string {
 		return "Howdy, " + name
 	})
 

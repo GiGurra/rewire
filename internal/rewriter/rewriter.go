@@ -217,6 +217,43 @@ func RewriteAllExported(src []byte) ([]byte, error) {
 	return result, nil
 }
 
+// ListExportedFunctions returns the names of exported functions in the source
+// that are eligible for rewriting (same criteria as RewriteAllExported).
+func ListExportedFunctions(src []byte) ([]string, error) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "", src, parser.ParseComments)
+	if err != nil {
+		return nil, fmt.Errorf("parsing source: %w", err)
+	}
+
+	existing := collectDeclNames(file)
+	var names []string
+	for _, decl := range file.Decls {
+		fd, ok := decl.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		name := fd.Name.Name
+		if !ast.IsExported(name) {
+			continue
+		}
+		if fd.Recv != nil {
+			continue
+		}
+		if fd.Type.TypeParams != nil && fd.Type.TypeParams.NumFields() > 0 {
+			continue
+		}
+		if existing["Mock_"+name] {
+			continue
+		}
+		if name == "init" || name == "main" {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names, nil
+}
+
 // collectDeclNames returns the set of top-level declaration names in the file.
 func collectDeclNames(file *ast.File) map[string]bool {
 	names := make(map[string]bool)
