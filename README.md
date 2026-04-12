@@ -6,8 +6,6 @@ Compile-time function mocking for Go. Replace any function during tests — no m
 
 Production source stays **100% clean**. Rewire intercepts the Go compiler via `-toolexec`, scans your test files, and rewrites specific function calls on the fly before passing it to the compiler. Source on disk is never modified.
 
-Inspired by Erlang's [meck](https://github.com/eproxus/meck).
-
 ## Quick start
 
 ```bash
@@ -186,3 +184,6 @@ docs/                    Design docs and decision log
 ## License
 
 MIT
+
+
+Inspired by Erlang's [meck](https://github.com/eproxus/meck), although the mechanism we rely on is entirely different.
