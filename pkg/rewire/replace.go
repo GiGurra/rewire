@@ -4,6 +4,7 @@ import (
 	"os"
 	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -34,16 +35,26 @@ func Func[F any](t *testing.T, original F, replacement F) {
 	mockPtrAny, ok := registry.Load(name)
 	if !ok {
 		goflags := os.Getenv("GOFLAGS")
-		if goflags == "" {
-			goflags = "(not set)"
+		if strings.Contains(goflags, "-toolexec=rewire") {
+			t.Fatalf("rewire: function %s cannot be mocked.\n"+
+				"  The toolexec is active but the function was not found in any source file.\n"+
+				"  Possible causes:\n"+
+				"    - The function is a compiler intrinsic (e.g. math.Abs, math.Sqrt on arm64)\n"+
+				"    - The function is implemented in assembly\n"+
+				"    - The function name is misspelled",
+				name)
+		} else {
+			if goflags == "" {
+				goflags = "(not set)"
+			}
+			t.Fatalf("rewire: function %s cannot be mocked — toolexec rewriting is not active.\n"+
+				"  Current GOFLAGS=%s\n"+
+				"  To fix:\n"+
+				"    1. Set GOFLAGS to include -toolexec=rewire (e.g. export GOFLAGS=\"-toolexec=rewire\")\n"+
+				"    2. Run: go clean -cache\n"+
+				"    3. Re-run your tests",
+				name, goflags)
 		}
-		t.Fatalf("rewire: function %s cannot be mocked — toolexec rewriting is not active.\n"+
-			"  Current GOFLAGS=%s\n"+
-			"  To fix:\n"+
-			"    1. Set GOFLAGS to include -toolexec=rewire (e.g. export GOFLAGS=\"-toolexec=rewire\")\n"+
-			"    2. Run: go clean -cache\n"+
-			"    3. Re-run your tests",
-			name, goflags)
 	}
 
 	ptrVal := reflect.ValueOf(mockPtrAny)

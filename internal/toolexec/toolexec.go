@@ -55,6 +55,20 @@ func Run(args []string) int {
 	funcsToMock := targets[pkgPath]
 	isTest := hasTestFiles(toolArgs)
 
+	// Reject intrinsic functions early — the compiler replaces calls to these
+	// with CPU instructions at the call site, so our wrapper is never invoked
+	for _, fn := range funcsToMock {
+		if isIntrinsic(pkgPath, fn) {
+			fmt.Fprintf(os.Stderr,
+				"rewire: error: function %s.%s cannot be mocked.\n"+
+					"  It is a compiler intrinsic — the Go compiler replaces calls to it\n"+
+					"  with a CPU instruction, bypassing any mock wrapper.\n"+
+					"  See: $GOROOT/src/cmd/compile/internal/ssagen/intrinsics.go\n",
+				pkgPath, fn)
+			return 1
+		}
+	}
+
 	if len(funcsToMock) == 0 && !isTest {
 		return execTool(tool, toolArgs)
 	}
@@ -248,7 +262,7 @@ func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, isT
 			newArgs[i] = tmpFile
 		}
 
-		// Check that all requested functions were actually found and rewritten
+		// Verify all requested functions were found — if not, fail clearly
 		rewrittenSet := map[string]bool{}
 		for _, fn := range rewrittenFuncs {
 			rewrittenSet[fn] = true
@@ -257,11 +271,8 @@ func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, isT
 			if !rewrittenSet[fn] {
 				cleanup()
 				return nil, nil, fmt.Errorf(
-					"function %s.%s was not found in any source file.\n"+
-						"  Possible causes:\n"+
-						"  - The function is a compiler intrinsic (e.g. math.Abs on arm64)\n"+
-						"  - The function is implemented in assembly\n"+
-						"  - The function name is misspelled in rewire.Func()",
+					"function %s.%s cannot be mocked — not found in any source file.\n"+
+						"  The function may be implemented in assembly or excluded by build constraints.",
 					pkgPath, fn)
 			}
 		}
