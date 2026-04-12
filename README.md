@@ -25,9 +25,8 @@ go clean -cache
 GOFLAGS="-toolexec=rewire" go test ./...
 ```
 
-## Function mocking (toolexec)
-
-Replace any function at test time — no code changes required.
+<details>
+<summary><strong>Function mocking</strong> — replace any function at test time, no code changes required</summary>
 
 Given production code:
 
@@ -66,26 +65,7 @@ func TestWelcome_Real(t *testing.T) {
 }
 ```
 
-Pass the original function and its replacement. No mock variable names, no generated types, no interface wrappers.
-
-### Mocking methods
-
-Methods work too — use Go's method expression syntax:
-
-```go
-func TestGreetWith_MockedMethod(t *testing.T) {
-    rewire.Func(t, (*bar.Greeter).Greet, func(g *bar.Greeter, name string) string {
-        return "Mocked, " + name
-    })
-    // All calls to (*Greeter).Greet use the mock in this test
-}
-```
-
-Note: method mocks apply to **all instances** of the type, not a specific object. This is consistent with how function mocking works — the mock variable is package-level.
-
-### Mocking stdlib and external packages
-
-Rewire works with any package, not just your own:
+Pass the original function and its replacement. No mock variable names, no generated types, no interface wrappers. Works with any package — stdlib, third-party, same-module:
 
 ```go
 func TestSquareRoot(t *testing.T) {
@@ -96,9 +76,34 @@ func TestSquareRoot(t *testing.T) {
 }
 ```
 
-## Interface mock generation
+Requires `GOFLAGS="-toolexec=rewire"` to be set (see [Setup](#setup)).
 
-For interfaces you pass in (dependency injection), rewire generates lightweight mock structs:
+</details>
+
+<details>
+<summary><strong>Method mocking</strong> — replace struct methods using Go method expression syntax</summary>
+
+```go
+func TestGreetWith_MockedMethod(t *testing.T) {
+    rewire.Func(t, (*bar.Greeter).Greet, func(g *bar.Greeter, name string) string {
+        return "Mocked, " + name
+    })
+    // All calls to (*Greeter).Greet use the mock in this test
+}
+```
+
+Both pointer (`(*Type).Method`) and value (`Type.Method`) receivers are supported. The replacement function receives the receiver as its first argument.
+
+Note: method mocks apply to **all instances** of the type, not a specific object. This is consistent with how function mocking works — the mock variable is package-level.
+
+Requires `GOFLAGS="-toolexec=rewire"` to be set (see [Setup](#setup)).
+
+</details>
+
+<details>
+<summary><strong>Interface mock generation</strong> — generate mock structs for dependency injection</summary>
+
+For interfaces you pass in, rewire generates lightweight mock structs:
 
 ```bash
 rewire mock -f bar.go -i Store -p foo -o mock_store_test.go
@@ -152,7 +157,12 @@ go test ./...       # run tests
 
 Handles imported types (`context.Context`, `*http.Request`, `io.Reader`, etc.), variadic parameters, unnamed parameters, and multiple return values.
 
-## How it works
+Does **not** require toolexec — this is standard code generation.
+
+</details>
+
+<details>
+<summary><strong>How it works</strong> — toolexec compile-time rewriting</summary>
 
 1. **Pre-scan** — rewire scans `_test.go` files in your module for `rewire.Func` calls and builds a target list (e.g., `bar.Greet`, `math.Pow`)
 2. **Targeted rewrite** — when the compiler processes a package containing targeted functions, rewire rewrites only those functions with a `Mock_` variable and nil-check wrapper
@@ -178,7 +188,10 @@ func _real_Greet(name string) string {
 }
 ```
 
-## Setup
+</details>
+
+<details>
+<summary><strong>Setup</strong> — IDE and terminal configuration for toolexec</summary>
 
 ### Recommended: test-specific environment
 
@@ -217,22 +230,20 @@ export GOFLAGS="-toolexec=rewire"
 
 This is simpler but means `go build` also rewrites targeted functions. The overhead is probably negligible in most situations — only functions you explicitly mock are affected, and it's just a nil check.
 
-## Test isolation
+</details>
 
-Each `go test` package compiles into a separate binary:
-- `foo`'s tests can mock `bar.Greet`
-- `baz`'s tests can use the real `bar.Greet`
-- No configuration needed — each test binary is independent
+<details>
+<summary><strong>Limitations</strong> — function/method mocking (toolexec)</summary>
 
-Within a test package, `rewire.Func` uses `t.Cleanup` to restore the original after each test.
-
-## Limitations
+These limitations apply to compile-time function/method mocking only, not interface mock generation.
 
 - **Compiler intrinsics** — functions like `math.Abs`, `math.Sqrt`, `math.Floor` are replaced with CPU instructions by the compiler. Rewire detects these and fails with a clear error. Use non-intrinsic alternatives (e.g., `math.Pow` works fine).
 - **Method mocks are global** — method mocks apply to all instances of a type, not per-object. This is consistent with function mocking.
 - **No generics** — generic functions are skipped
 - **No parallel mock safety** — parallel tests in the same package should not mock the same function with different replacements
 - **Bodyless functions** — functions implemented in assembly (no Go body) cannot be rewritten
+
+</details>
 
 ## Acknowledgements
 
