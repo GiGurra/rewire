@@ -7,7 +7,7 @@ A complete mocking solution for Go:
 - **Replace any function or method at test time** — package-level functions, struct methods, stdlib, third-party. No interfaces, no dependency injection, no unsafe runtime patches. This is what other mocking libraries can't do.
 - **Generate mock structs for interfaces** — for traditional dependency-injection style testing, like other Go mocking libraries.
 
-One tool, both approaches. Production source stays **100% clean** — rewire intercepts the Go compiler via `-toolexec` and rewrites only the specific functions you mock. Source on disk is never modified.
+One tool, both approaches. Production code on disk is never modified — for function/method mocking, rewire intercepts the Go compiler via `-toolexec` and rewrites only the specific functions you mock, entirely in-memory during compilation. Interface mocks are generated into test files.
 
 ## Quick start
 
