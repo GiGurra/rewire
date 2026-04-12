@@ -251,7 +251,7 @@ These limitations apply to compile-time function/method mocking only, not interf
 
 ## Acknowledgements
 
-This project is 100% vibe coded — AST rewriting and compiler toolchains are way outside my comfort zone. Built entirely with [Claude Code](https://claude.ai/claude-code).
+This project is 100% vibe coded — AST rewriting and compiler toolchains are way outside my comfort zone. Built entirely with [Claude Code](https://claude.ai).
 
 Inspired by Erlang's [meck](https://github.com/eproxus/meck), although the mechanism is entirely different.
 
