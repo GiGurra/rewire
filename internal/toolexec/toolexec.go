@@ -1,14 +1,12 @@
 package toolexec
 
 import (
-	"encoding/json"
 	"fmt"
 	"go/parser"
 	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/GiGurra/rewire/internal/rewriter"
@@ -18,9 +16,9 @@ import (
 //
 //	rewire /path/to/go/tool/compile <args...>
 //
-// Rewriting only happens during 'go test' builds and only for functions
-// explicitly referenced in rewire.Func calls. All other compilations
-// pass through untouched.
+// For compile invocations, it rewrites functions that are targets of
+// rewire.Func calls in test files. Registration files are generated
+// for test compilations to connect mock variables to the rewire registry.
 func Run(args []string) int {
 	if len(args) < 1 {
 		fmt.Fprintln(os.Stderr, "rewire toolexec: missing tool argument")
@@ -30,11 +28,7 @@ func Run(args []string) int {
 	tool := args[0]
 	toolArgs := args[1:]
 
-	// Only intercept the compile tool during test builds
 	if !isCompileTool(tool) {
-		return execTool(tool, toolArgs)
-	}
-	if !isGoTestBuild() {
 		return execTool(tool, toolArgs)
 	}
 
@@ -51,12 +45,10 @@ func Run(args []string) int {
 	// Load the set of functions to mock (scanned from test files)
 	targets := loadOrScanMockTargets(moduleRoot)
 
-	// Check if this package has any functions to mock
 	funcsToMock := targets[pkgPath]
 	isTest := hasTestFiles(toolArgs)
 
-	// Reject intrinsic functions early — the compiler replaces calls to these
-	// with CPU instructions at the call site, so our wrapper is never invoked
+	// Reject intrinsic functions early
 	for _, fn := range funcsToMock {
 		if isIntrinsic(pkgPath, fn) {
 			fmt.Fprintf(os.Stderr,
@@ -73,7 +65,7 @@ func Run(args []string) int {
 		return execTool(tool, toolArgs)
 	}
 
-	rewrittenArgs, cleanup, err := rewriteCompileArgs(toolArgs, pkgPath, funcsToMock, isTest)
+	rewrittenArgs, cleanup, err := rewriteCompileArgs(toolArgs, pkgPath, funcsToMock, isTest, targets)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "rewire: rewrite failed for %s: %v\n", pkgPath, err)
 		return 1
@@ -83,20 +75,6 @@ func Run(args []string) int {
 	}
 
 	return execTool(tool, rewrittenArgs)
-}
-
-// isGoTestBuild checks if the parent process is 'go test'.
-func isGoTestBuild() bool {
-	ppid := os.Getppid()
-	out, err := exec.Command("ps", "-p", strconv.Itoa(ppid), "-o", "args=").Output()
-	if err != nil {
-		return false
-	}
-	args := strings.Fields(strings.TrimSpace(string(out)))
-	if len(args) < 2 {
-		return false
-	}
-	return args[1] == "test"
 }
 
 func isCompileTool(tool string) bool {
@@ -110,58 +88,6 @@ func hasTestFiles(args []string) bool {
 		}
 	}
 	return false
-}
-
-// manifestDir returns a temp directory shared across all toolexec invocations
-// in the same 'go test' run, keyed on the parent PID.
-func manifestDir() string {
-	return filepath.Join(os.TempDir(), fmt.Sprintf("rewire-%d", os.Getppid()))
-}
-
-type manifest struct {
-	ImportPath  string   `json:"importPath"`
-	PackageName string   `json:"packageName"`
-	Functions   []string `json:"functions"`
-}
-
-func writeManifest(m manifest) error {
-	dir := manifestDir()
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-	data, err := json.Marshal(m)
-	if err != nil {
-		return err
-	}
-	safeName := strings.ReplaceAll(m.ImportPath, "/", "_")
-	return os.WriteFile(filepath.Join(dir, safeName+".json"), data, 0644)
-}
-
-func readAllManifests() ([]manifest, error) {
-	dir := manifestDir()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var result []manifest
-	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".json") || e.Name() == "mock_targets.json" {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
-		if err != nil {
-			continue
-		}
-		var m manifest
-		if err := json.Unmarshal(data, &m); err != nil {
-			continue
-		}
-		result = append(result, m)
-	}
-	return result, nil
 }
 
 // findModuleInfo returns the module path and root directory.
@@ -203,8 +129,8 @@ func findFlag(args []string, flag string) string {
 }
 
 // rewriteCompileArgs rewrites only the specific functions listed in funcsToMock.
-// For test compilations, it also generates a registration file from manifests.
-func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, isTest bool) ([]string, func(), error) {
+// For test compilations, it generates a registration file directly from targets.
+func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, isTest bool, allTargets mockTargets) ([]string, func(), error) {
 	tmpDir, err := os.MkdirTemp("", "rewire-*")
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating temp dir: %w", err)
@@ -214,11 +140,10 @@ func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, isT
 	newArgs := make([]string, len(args))
 	copy(newArgs, args)
 
-	var rewrittenFuncs []string
-	var pkgName string
-
-	// Rewrite only the specified functions in non-test source files
+	// Rewrite targeted functions in non-test source files
 	if len(funcsToMock) > 0 {
+		var rewrittenFuncs []string
+
 		for i, arg := range newArgs {
 			if !strings.HasSuffix(arg, ".go") || strings.HasSuffix(arg, "_test.go") {
 				continue
@@ -230,16 +155,10 @@ func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, isT
 				return nil, nil, fmt.Errorf("reading %s: %w", arg, err)
 			}
 
-			if pkgName == "" {
-				pkgName = extractPackageName(src)
-			}
-
-			// Only rewrite functions that are in this file
 			rewritten := src
 			for _, fn := range funcsToMock {
 				result, err := rewriter.RewriteSource(rewritten, fn)
 				if err != nil {
-					// Function might not be in this file — that's OK
 					if strings.Contains(err.Error(), "not found") {
 						continue
 					}
@@ -262,7 +181,7 @@ func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, isT
 			newArgs[i] = tmpFile
 		}
 
-		// Verify all requested functions were found — if not, fail clearly
+		// Verify all requested functions were found
 		rewrittenSet := map[string]bool{}
 		for _, fn := range rewrittenFuncs {
 			rewrittenSet[fn] = true
@@ -276,20 +195,11 @@ func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, isT
 					pkgPath, fn)
 			}
 		}
-
-		// Write manifest of what was actually rewritten
-		if len(rewrittenFuncs) > 0 && pkgName != "" {
-			writeManifest(manifest{
-				ImportPath:  pkgPath,
-				PackageName: pkgName,
-				Functions:   rewrittenFuncs,
-			})
-		}
 	}
 
-	// For test compilations, generate registration from manifests
+	// For test compilations, generate registration directly from targets
 	if isTest {
-		regFile, err := generateRegistration(args)
+		regFile, err := generateRegistration(args, allTargets)
 		if err != nil {
 			cleanup()
 			return nil, nil, fmt.Errorf("generating registration: %w", err)
@@ -307,9 +217,9 @@ func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, isT
 	return newArgs, cleanup, nil
 }
 
-// generateRegistration creates init() code that registers mock var pointers
-// for all packages that were rewritten during this build.
-func generateRegistration(compileArgs []string) (string, error) {
+// generateRegistration creates init() code that registers mock var pointers.
+// It works directly from mock targets — no manifests needed.
+func generateRegistration(compileArgs []string, targets mockTargets) (string, error) {
 	pkgName := ""
 	allImports := map[string]bool{}
 
@@ -334,11 +244,6 @@ func generateRegistration(compileArgs []string) (string, error) {
 		return "", nil
 	}
 
-	manifests, err := readAllManifests()
-	if err != nil {
-		return "", fmt.Errorf("reading manifests: %w", err)
-	}
-
 	type entry struct {
 		importPath string
 		alias      string
@@ -347,24 +252,38 @@ func generateRegistration(compileArgs []string) (string, error) {
 	var entries []entry
 	usedAliases := map[string]int{}
 
-	for _, m := range manifests {
-		if !allImports[m.ImportPath] || len(m.Functions) == 0 {
+	for importPath, funcs := range targets {
+		if !allImports[importPath] || len(funcs) == 0 {
 			continue
 		}
-		if m.ImportPath == "github.com/GiGurra/rewire/pkg/rewire" {
+		if importPath == "github.com/GiGurra/rewire/pkg/rewire" {
 			continue
 		}
 
-		alias := "_rewire_" + m.PackageName
+		// Filter out intrinsics
+		var mockable []string
+		for _, fn := range funcs {
+			if !isIntrinsic(importPath, fn) {
+				mockable = append(mockable, fn)
+			}
+		}
+		if len(mockable) == 0 {
+			continue
+		}
+
+		// Derive package qualifier from import path (last segment)
+		segments := strings.Split(importPath, "/")
+		pkgLocalName := segments[len(segments)-1]
+		alias := "_rewire_" + pkgLocalName
 		if count := usedAliases[alias]; count > 0 {
-			alias = fmt.Sprintf("_rewire_%s_%d", m.PackageName, count+1)
+			alias = fmt.Sprintf("_rewire_%s_%d", pkgLocalName, count+1)
 		}
 		usedAliases[alias]++
 
 		entries = append(entries, entry{
-			importPath: m.ImportPath,
+			importPath: importPath,
 			alias:      alias,
-			funcNames:  m.Functions,
+			funcNames:  mockable,
 		})
 	}
 

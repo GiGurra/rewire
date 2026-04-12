@@ -2,6 +2,7 @@ package toolexec
 
 import (
 	"encoding/json"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -16,9 +17,11 @@ type mockTargets map[string][]string
 
 // loadOrScanMockTargets returns the set of functions that need to be mocked,
 // as declared by rewire.Func calls in test files across the module.
-// Results are cached in the manifest dir for the duration of the build.
+// Results are cached per parent process to avoid rescanning on every
+// toolexec invocation within the same build.
 func loadOrScanMockTargets(moduleRoot string) mockTargets {
-	cacheFile := filepath.Join(manifestDir(), "mock_targets.json")
+	cacheDir := filepath.Join(os.TempDir(), fmt.Sprintf("rewire-%d", os.Getppid()))
+	cacheFile := filepath.Join(cacheDir, "mock_targets.json")
 
 	// Try reading cached result first
 	if data, err := os.ReadFile(cacheFile); err == nil {
@@ -31,8 +34,8 @@ func loadOrScanMockTargets(moduleRoot string) mockTargets {
 	// Scan all test files in the module
 	targets := scanAllTestFiles(moduleRoot)
 
-	// Cache for subsequent invocations
-	os.MkdirAll(manifestDir(), 0755)
+	// Cache for subsequent invocations in this build
+	os.MkdirAll(cacheDir, 0755)
 	if data, err := json.Marshal(targets); err == nil {
 		os.WriteFile(cacheFile, data, 0644)
 	}
@@ -46,7 +49,6 @@ func scanAllTestFiles(moduleRoot string) mockTargets {
 
 	filepath.WalkDir(moduleRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
-			// Skip hidden dirs and common non-source dirs
 			if d != nil && d.IsDir() {
 				name := d.Name()
 				if strings.HasPrefix(name, ".") || name == "vendor" || name == "node_modules" {
@@ -66,7 +68,6 @@ func scanAllTestFiles(moduleRoot string) mockTargets {
 		return nil
 	})
 
-	// Deduplicate
 	for pkg, funcs := range targets {
 		targets[pkg] = dedupe(funcs)
 	}
@@ -112,7 +113,6 @@ func scanFileForMockCalls(path string) mockTargets {
 			return true
 		}
 
-		// Match: <rewireLocalName>.Func(...)
 		sel, ok := call.Fun.(*ast.SelectorExpr)
 		if !ok {
 			return true
@@ -126,7 +126,6 @@ func scanFileForMockCalls(path string) mockTargets {
 			return true
 		}
 
-		// Second arg should be pkg.FuncName
 		funcSel, ok := call.Args[1].(*ast.SelectorExpr)
 		if !ok {
 			return true
