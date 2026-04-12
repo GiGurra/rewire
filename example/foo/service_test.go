@@ -1,5 +1,10 @@
 package foo
 
+//go:generate rewire mock -f ../bar/interfaces.go -i GreeterIface -p foo -o mock_greeteriface_test.go
+//go:generate rewire mock -f ../bar/interfaces.go -i Store -p foo -o mock_store_test.go
+//go:generate rewire mock -f ../bar/interfaces.go -i Logger -p foo -o mock_logger_test.go
+//go:generate rewire mock -f ../bar/interfaces.go -i HTTPClient -p foo -o mock_httpclient_test.go
+
 import (
 	"context"
 	"errors"

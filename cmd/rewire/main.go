@@ -22,6 +22,7 @@ type MockParams struct {
 	File      string `descr:"Go source file containing the interface" short:"f"`
 	Interface string `descr:"interface name to generate a mock for" short:"i"`
 	Pkg       string `descr:"output package name (default: inferred from source file)" short:"p" optional:"true"`
+	Out       string `descr:"output file path (default: stdout)" short:"o" optional:"true"`
 }
 
 func main() {
@@ -64,7 +65,7 @@ to control behavior; unset methods return zero values.
 
 Example:
   rewire mock -f bar.go -i Greeter
-  rewire mock -f bar.go -i Greeter -p bar_test > mock_greeter_test.go`,
+  rewire mock -f bar.go -i Greeter -p bar_test -o mock_greeter_test.go`,
 				RunFunc: runMock,
 			},
 		),
@@ -115,5 +116,12 @@ func runMock(params *MockParams, _ *cobra.Command, _ []string) {
 		os.Exit(1)
 	}
 
-	os.Stdout.Write(out)
+	if params.Out != "" {
+		if err := os.WriteFile(params.Out, out, 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "error writing %s: %v\n", params.Out, err)
+			os.Exit(1)
+		}
+	} else {
+		os.Stdout.Write(out)
+	}
 }
