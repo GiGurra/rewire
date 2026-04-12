@@ -4,35 +4,30 @@
 
 Go's strict static dispatch makes it hard to mock functions in tests without changing production code. The common approaches all have significant drawbacks:
 
-- **Dependency injection (interfaces)**: Requires designing all code around interfaces. Adds boilerplate and indirection even when there's only one implementation. Infects the entire call chain — if `foo` calls `bar` calls `baz`, you need interfaces at every level.
-- **Function pointer variables**: Replace `func Greet(...)` with `var Greet = func(...)`. Works, but changes the function's nature — different godoc, can be accidentally reassigned, can't satisfy interfaces. Pollutes production code with test concerns.
+- **Dependency injection (interfaces)**: Requires designing all code around interfaces. Adds boilerplate and indirection even when there's only one implementation. Infects the entire call chain.
+- **Function pointer variables**: Replace `func Greet(...)` with `var Greet = func(...)`. Works, but changes the function's nature — different godoc, can be accidentally reassigned. Pollutes production code with test concerns.
 - **Runtime binary patching (gomonkey)**: Overwrites machine code at runtime with JMP instructions. Architecture-dependent, requires disabling inlining (`-gcflags=all=-l`), breaks on macOS Apple Silicon with hardened runtime, fragile across Go versions.
 
 The goal: mock any function during tests with **zero changes to production code**, in a way that works with standard Go tooling and IDEs.
 
 ## Inspiration
 
-Erlang's [meck](https://github.com/eproxus/meck) library provides exactly this experience on the BEAM VM — you can replace any module's functions during tests and restore them after. This works because BEAM supports hot code loading and module replacement at runtime.
-
-Go doesn't have hot code loading, so we need a compile-time approach.
+Erlang's [meck](https://github.com/eproxus/meck) library provides exactly this experience on the BEAM VM — you can replace any module's functions during tests and restore them after. BEAM supports hot code loading; Go doesn't, so we need a compile-time approach.
 
 ## Chosen approach: toolexec + AST rewriting
 
 ### How it works
 
-1. The user sets `GOFLAGS="-toolexec=rewire"` and runs `go test ./...`
-2. Go's build system invokes `rewire` as a wrapper for each tool invocation (compiler, linker, etc.)
-3. When `rewire` intercepts a `compile` invocation for a same-module package, it:
-   - Reads the source files from the compiler args
-   - Rewrites all exported functions to add a `Mock_` variable and nil-check wrapper
-   - Writes the rewritten source to temp files
+1. The toolexec **pre-scans** all `_test.go` files in the module for `rewire.Func(t, pkg.Func, ...)` calls
+2. It builds a targeted mock list: which package + function combinations need rewriting
+3. When `rewire` intercepts a `compile` invocation for a package with targets, it:
+   - Rewrites only the targeted functions (adds `Mock_` variable + nil-check wrapper)
+   - Writes rewritten source to temp files
    - Invokes the real compiler with the temp file paths
-4. When compiling a **test package** (detected by the presence of `_test.go` files), rewire also:
-   - Parses imports to find same-module dependencies
-   - Enumerates exported functions in those dependencies
-   - Generates a `_rewire_init_test.go` file with `init()` that registers mock var pointers in a `sync.Map` registry via `rewire.Register`
-   - Adds this file to the compilation
-5. For all other tool invocations (link, asm, non-module packages), `rewire` passes through to the real tool unchanged
+4. When compiling a **test package** (has `_test.go` files), rewire also:
+   - Generates a `_rewire_init_test.go` file with `init()` that registers mock var pointers
+   - Registration is built directly from mock targets — no manifest files needed
+5. For all other tool invocations (link, asm, packages without targets), rewire passes through unchanged
 
 ### The rewrite transformation
 
@@ -46,8 +41,8 @@ func Greet(name string) string {
 var Mock_Greet func(name string) string
 
 func Greet(name string) string {
-    if f := Mock_Greet; f != nil {
-        return f(name)
+    if _rewire_mock := Mock_Greet; _rewire_mock != nil {
+        return _rewire_mock(name)
     }
     return _real_Greet(name)
 }
@@ -57,24 +52,28 @@ func _real_Greet(name string) string {
 }
 ```
 
-When `Mock_Greet` is nil (the default), the function behaves identically to the original — just one extra nil check, which the branch predictor handles at near-zero cost.
+The wrapper uses `_rewire_mock` as the local variable name to avoid shadowing function parameters (e.g., math functions commonly use `f` for `float64`).
 
 ### The registration mechanism
 
-For each test binary, toolexec generates a file like:
+For each test binary, toolexec generates a registration file directly from mock targets:
 
 ```go
 package foo
 
 import (
     "github.com/GiGurra/rewire/pkg/rewire"
-    "github.com/example/bar"
+    _rewire_bar "github.com/example/bar"
+    _rewire_math "math"
 )
 
 func init() {
-    rewire.Register("github.com/example/bar.Greet", &bar.Mock_Greet)
+    rewire.Register("github.com/example/bar.Greet", &_rewire_bar.Mock_Greet)
+    rewire.Register("math.Pow", &_rewire_math.Mock_Pow)
 }
 ```
+
+Import aliases (`_rewire_bar`, `_rewire_math`) avoid conflicts with user imports.
 
 At test time, `rewire.Func(t, bar.Greet, replacement)`:
 1. Calls `runtime.FuncForPC(reflect.ValueOf(bar.Greet).Pointer())` to get the function name
@@ -82,126 +81,111 @@ At test time, `rewire.Func(t, bar.Greet, replacement)`:
 3. Uses `reflect` to set the mock var to the replacement
 4. Registers a `t.Cleanup` to restore the original value
 
-This means the user never types or thinks about `Mock_Greet` — they just pass the original function.
+### Targeted rewriting (pre-scan)
 
-### IDE integration via GOFLAGS
+Earlier iterations rewrote ALL exported functions in same-module packages. This was simple but had problems:
+- Slow for large packages (stdlib packages have many exported functions)
+- Compiler directives (`//go:nosplit`, etc.) got displaced during AST reformatting
+- Variable shadowing (wrapper's `f` conflicting with function parameters)
+- Unnecessary — most functions are never mocked
 
-The key insight that makes this practical: Go's `GOFLAGS` environment variable is respected by all `go` commands, including those generated by IDEs. Setting `GOFLAGS=-toolexec=rewire` once means IntelliJ/GoLand's click-to-run test buttons work without any plugin or per-test configuration.
+The current approach pre-scans test files to build a precise target list. Only functions explicitly referenced in `rewire.Func` calls are rewritten. This solves all the above issues and enables external package mocking (stdlib, third-party).
 
-### Build cache behavior
+The chicken-and-egg problem (dependencies compile before test packages) is solved by scanning test files upfront: the toolexec walks the module directory for `_test.go` files, parses them with `go/ast`, and extracts `rewire.Func` call targets. Results are cached per build session.
 
-Go's build cache keys on compilation inputs. Important caching notes:
+### Compiler intrinsics
 
-- When switching between toolexec and non-toolexec builds, `go clean -cache` is needed to force a recompile
-- `-count=1` only bypasses the test *result* cache, not the compiled binary cache
-- Once GOFLAGS is set and the cache is rebuilt, subsequent runs use the correct toolexec-compiled binaries consistently
+Some functions (e.g., `math.Abs`, `math.Sqrt`, `math.Floor`) are replaced by CPU instructions at the **call site** by the Go compiler. Even though the source file is compiled and our wrapper exists, callers bypass it entirely — the compiler emits hardware instructions like `FABS` instead of a function call.
 
-If `rewire.Func` is called without toolexec active, it produces a clear error message showing the current `GOFLAGS` value and step-by-step fix instructions.
+Rewire detects these by parsing `$GOROOT/src/cmd/compile/internal/ssagen/intrinsics.go` (the compiler's own intrinsic registry). If a user tries to mock an intrinsic, the build fails with:
+
+```
+rewire: error: function math.Abs cannot be mocked.
+  It is a compiler intrinsic — the Go compiler replaces calls to it
+  with a CPU instruction, bypassing any mock wrapper.
+```
+
+### Build cache strategy
+
+Go's build cache keys on compilation inputs including the toolexec binary. Two recommended setups:
+
+**Separate test cache (recommended):**
+```bash
+GOFLAGS="-toolexec=rewire" GOCACHE="$HOME/.cache/rewire-test" go test ./...
+```
+
+Tests use their own cache. `go build` uses the default cache without toolexec. No cross-contamination.
+
+**Global GOFLAGS (simpler, minimal overhead):**
+```bash
+export GOFLAGS="-toolexec=rewire"
+```
+
+Both `go build` and `go test` use toolexec. Since only targeted functions are rewritten (not all exported functions), the production overhead is a single nil check per mocked function — negligible.
 
 ### Test isolation
 
-Go compiles a separate test binary for each package. This gives us natural isolation:
-- Package `foo`'s tests mock `bar.Greet` — the mock only exists in foo's test binary
-- Package `baz`'s tests use real `bar.Greet` — baz's binary has `Mock_Greet` but it's nil
+Go compiles a separate test binary for each package:
+- Package `foo`'s tests mock `bar.Greet` — only foo's binary has the mock registered
+- Package `baz`'s tests use real `bar.Greet` — the mock var exists but is nil
 - No configuration needed to scope mocks per test package
 
 Within a test package, `rewire.Func` uses `t.Cleanup` to restore the mock variable after each test.
-
-### Why rewrite ALL exported functions?
-
-A smarter approach would be to only rewrite functions that tests actually mock. But this creates a chicken-and-egg problem:
-
-1. To know which functions to mock, we'd need to scan test source files for `rewire.Func` calls
-2. Dependencies (like `bar`) are compiled **before** the test package (like `foo`) that uses them
-3. When toolexec intercepts bar's compilation, it hasn't seen foo's test files yet
-
-Options we considered:
-- **Pre-scan phase**: Before compilation starts, scan all test files. But toolexec doesn't have a "pre-build" hook — it's invoked per-compilation.
-- **Config file**: Declare mocks in a YAML/JSON file. Works but separates the mock declaration from the test that uses it.
-- **Two-pass build**: Compile once to scan, again to rewrite. Doubles build time.
-
-Blanket-rewriting all exported functions is simpler and the overhead is negligible (one nil check per function call, no allocation). For a v1 this is the right tradeoff.
 
 ## Approaches considered and rejected
 
 ### Runtime binary patching (gomonkey-style)
 
-**What it is**: Overwrite function machine code at runtime with a JMP instruction to the replacement.
+**What it is**: Overwrite function machine code at runtime with a JMP instruction.
 
-**Why rejected**:
-- Architecture-dependent (x86 vs ARM64 have different patch sequences)
-- Requires `-gcflags=all=-l` to disable ALL inlining, not just for mocked functions
-- Breaks on macOS Apple Silicon with W^X enforcement and hardened runtime
-- Fragile across Go versions as compiler internals change
-- CI environments with restricted `mprotect` block it
+**Why rejected**: Architecture-dependent, requires `-gcflags=all=-l` to disable ALL inlining, breaks on macOS Apple Silicon (W^X enforcement), fragile across Go versions, blocked in some CI environments.
 
-**What it's better at**: Zero setup, no build tooling, works on any function including third-party.
+**What it's better at**: Zero setup, works on any function including third-party and intrinsics.
 
 ### Build tags with separate mock files
 
-**What it is**: Keep original source in `bar.go` with `//go:build !rewire`, generate mock version in `bar_rewire.go` with `//go:build rewire`. Use `-tags rewire` during tests.
+**What it is**: Keep original in `bar.go` with `//go:build !rewire`, generate mock in `bar_rewire.go` with `//go:build rewire`.
 
-**Why rejected**:
-- IntelliJ needs the build tag configured in project settings
-- Puts generated mock files alongside production code
-- Two copies of every function to maintain (even if generated)
-- Build tags affect all compilation, not just tests
+**Why rejected**: IDE needs build tag configured, puts generated files alongside production code, build tags affect all compilation not just tests.
 
 ### -overlay flag
 
-**What it is**: Go supports `-overlay=overlay.json` which tells the build system to substitute source files. We could generate rewritten files in a cache directory and use overlay to swap them during tests.
+**What it is**: Go's `-overlay=overlay.json` substitutes source files during compilation.
 
-**Why rejected for v1**:
-- Requires a daemon or pre-build step to generate overlay files
-- Cache invalidation when source changes
-- More complex than toolexec for the same end result
-
-**Why it's interesting for v2**: `-overlay` is respected by `go list` and `gopls`, which means IDE static analysis would see the generated mock variables. This would solve the "red squiggles in test files" problem when using `rewire.Replace` with explicit mock var names. (The `rewire.Func` API avoids this issue since it only references the original function.)
+**Why rejected for v1**: Requires a daemon or pre-build step, complex cache invalidation. Interesting for v2 because `-overlay` is respected by `gopls`, enabling IDE integration.
 
 ### go:linkname for cross-package variable access
 
-**What it is**: Use `//go:linkname` to access a shared mock registry across packages without explicit imports.
+**What it is**: Use `//go:linkname` to access a shared mock registry without imports.
 
-**Why rejected**:
-- Go 1.23+ restricts `go:linkname` — target symbols must opt in
-- Requires `import _ "unsafe"` in rewritten code
-- Fragile across Go versions as the Go team tightens restrictions
+**Why rejected**: Go 1.23+ restricts `go:linkname`, requires `import _ "unsafe"`, fragile across versions.
 
 ### Source-level function pointer vars
 
-**What it is**: Replace `func Greet(...)` with `var Greet = func(...)` in production code.
+**What it is**: Replace `func Greet(...)` with `var Greet = func(...)`.
 
-**Why rejected**:
-- Changes the nature of the declaration (var vs func)
-- Can be accidentally reassigned in production
-- Different `go doc` output
-- Pollutes production code with test concerns
-- The user's explicit requirement was no production code changes
+**Why rejected**: Changes the declaration nature, can be accidentally reassigned, different `go doc`, pollutes production code. The explicit requirement was zero production code changes.
+
+### Blanket rewriting of all exported functions
+
+**What it was**: Earlier iteration rewrote ALL exported functions in same-module packages.
+
+**Why replaced**: Slow for large packages, broke stdlib packages (compiler directives, variable shadowing), prevented external package mocking. Replaced by targeted rewriting based on pre-scanning test files.
 
 ## Future work
 
 ### gopls integration via -overlay
 
-Generate an overlay JSON file that maps source files to their rewritten versions. If `GOFLAGS` includes `-overlay=/path/to/rewire-overlay.json`, gopls would see the mock variables. A `rewire daemon` or `rewire sync` command would keep the overlay up to date. This mainly benefits users of the low-level `rewire.Replace` API — the `rewire.Func` API already avoids referencing generated symbols.
+Generate an overlay JSON file mapping source files to rewritten versions. `gopls` would see mock variables and provide autocomplete. A `rewire daemon` could keep the overlay in sync.
 
 ### Method support
 
-Methods (`func (s *Server) Handle(...)`) need special handling — the mock variable type includes the receiver, and the wrapper needs to forward the receiver. This is straightforward to implement but was deferred for v1.
+Methods need special handling — the mock variable type includes the receiver, and the wrapper needs to forward it.
 
 ### Generic function support
 
-Generic functions (`func Map[T any](...)`) need mock variables with matching type parameters. The mock var type and wrapper become more complex. Deferred for v1.
-
-### Smarter rewriting scope
-
-Instead of rewriting all exported functions, we could:
-- Use a config file to whitelist packages/functions
-- Cache the set of mocked functions from previous test runs
-- Use `go/packages` to pre-scan test files before compilation
+Generic functions need mock variables with matching type parameters.
 
 ### Parallel test safety
 
-Currently, parallel tests that mock the same function in the same package race on the mock variable. Options:
-- Goroutine-local storage (Go doesn't support this natively)
-- Per-test context threading (requires mocked functions to accept context)
-- Document the limitation and recommend non-parallel tests for shared mocks
+Parallel tests that mock the same function race on the mock variable. Options: goroutine-local storage (not native in Go), per-test context threading, or documenting the limitation.

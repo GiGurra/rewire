@@ -1,8 +1,8 @@
 # rewire
 
-Compile-time function mocking for Go. Replace any exported function during tests — no interfaces, no dependency injection, no unsafe runtime patches.
+Compile-time function mocking for Go. Replace any function during tests — no interfaces, no dependency injection, no unsafe runtime patches.
 
-Production source stays **100% clean**. Rewire works by intercepting the Go compiler via `-toolexec`, rewriting functions on the fly to add mock variables that only exist at compile time.
+Production source stays **100% clean**. Rewire intercepts the Go compiler via `-toolexec`, scans your test files for `rewire.Func` calls, and rewrites only those specific functions on the fly. Source on disk is never modified.
 
 Inspired by Erlang's [meck](https://github.com/eproxus/meck).
 
@@ -12,19 +12,13 @@ Inspired by Erlang's [meck](https://github.com/eproxus/meck).
 # Install
 go install github.com/GiGurra/rewire/cmd/rewire@latest
 
-# Set GOFLAGS (add to your shell profile for persistence)
-export GOFLAGS="-toolexec=rewire"
-
-# Clear build cache (one-time, after setting GOFLAGS)
-go clean -cache
-
-# Run tests — rewire is active transparently
-go test ./...
+# Run tests with rewire
+GOFLAGS="-toolexec=rewire" go test ./...
 ```
 
 ## Usage
 
-Given production code like this:
+Given production code:
 
 ```go
 // bar/bar.go — never modified
@@ -35,7 +29,7 @@ func Greet(name string) string {
 }
 ```
 
-You can mock it in tests:
+Mock it in tests:
 
 ```go
 // foo/foo_test.go
@@ -53,26 +47,37 @@ func TestWelcome_WithMock(t *testing.T) {
     })
 
     got := Welcome("Alice")
-    // bar.Greet now returns "Howdy, Alice" — restored automatically after test
+    // bar.Greet returns "Howdy, Alice" — restored automatically after test
 }
 
 func TestWelcome_Real(t *testing.T) {
-    got := Welcome("Bob")
     // bar.Greet uses the real implementation here
 }
 ```
 
-That's it. Pass the original function and its replacement. No mock variable names, no generated types, no interface wrappers.
+Pass the original function and its replacement. No mock variable names, no generated types, no interface wrappers.
+
+### Mocking stdlib and external packages
+
+Rewire works with any package, not just your own:
+
+```go
+func TestSquareRoot(t *testing.T) {
+    rewire.Func(t, math.Pow, func(x, y float64) float64 {
+        return 42
+    })
+    // math.Pow now returns 42 in this test
+}
+```
 
 ## How it works
 
-When `go test -toolexec=rewire` compiles a same-module package, rewire:
+1. **Pre-scan** — rewire scans `_test.go` files in your module for `rewire.Func` calls and builds a target list (e.g., `bar.Greet`, `math.Pow`)
+2. **Targeted rewrite** — when the compiler processes a package containing targeted functions, rewire rewrites only those functions with a `Mock_` variable and nil-check wrapper
+3. **Registration** — when compiling a test package, rewire generates an `init()` that registers mock variable pointers in a runtime registry
+4. **Runtime swap** — `rewire.Func` uses `runtime.FuncForPC` to resolve the function name, looks up the mock variable pointer, and swaps it via `reflect`. `t.Cleanup` restores the original
 
-1. **Rewrites exported functions** — adds a `Mock_` variable and nil-check wrapper per function
-2. **Generates a registration file** — for test compilations, maps function names to mock variable pointers in a runtime registry
-3. **Passes rewritten source to the real compiler** — source on disk is never touched
-
-At test time, `rewire.Func` uses `runtime.FuncForPC` to resolve the original function name, looks up the mock variable pointer in the registry, and swaps it via `reflect`. `t.Cleanup` restores the original after each test.
+Only functions explicitly listed in `rewire.Func` calls are rewritten. Everything else passes through untouched.
 
 The rewrite transformation (only exists during compilation):
 
@@ -80,8 +85,8 @@ The rewrite transformation (only exists during compilation):
 var Mock_Greet func(name string) string
 
 func Greet(name string) string {
-    if f := Mock_Greet; f != nil {
-        return f(name)
+    if _rewire_mock := Mock_Greet; _rewire_mock != nil {
+        return _rewire_mock(name)
     }
     return _real_Greet(name)
 }
@@ -91,75 +96,71 @@ func _real_Greet(name string) string {
 }
 ```
 
-When `Mock_Greet` is nil (the default), the function behaves identically to the original — just one nil check, which the branch predictor handles at near-zero cost.
+## Setup
 
-## IDE integration (IntelliJ / GoLand / VS Code)
+### Recommended: test-specific environment
 
-Set `GOFLAGS` once and your IDE's click-to-run test works transparently:
+Keep test builds in a separate cache so `go build` and `go test` never interfere:
+
+**Terminal (alias in shell profile):**
+```bash
+alias gotest='GOFLAGS="-toolexec=rewire" GOCACHE="$HOME/.cache/rewire-test" go test'
+```
+
+**GoLand:** Run > Edit Configurations > Templates > Go Test > Environment variables:
+```
+GOFLAGS=-toolexec=rewire
+GOCACHE=/Users/<you>/.cache/rewire-test
+```
+
+**VS Code (settings.json):**
+```json
+"go.testEnvVars": {
+    "GOFLAGS": "-toolexec=rewire",
+    "GOCACHE": "${env:HOME}/.cache/rewire-test"
+}
+```
+
+With this setup:
+- `go build` uses the default cache — clean production binaries, no rewire artifacts
+- `go test` (via alias or IDE) uses a separate cache — rewire active, no cache conflicts
+
+### Alternative: global GOFLAGS
+
+If you don't mind the minimal overhead (a nil check per mocked function in production builds):
 
 ```bash
 export GOFLAGS="-toolexec=rewire"
 ```
 
-Add this to your shell profile (`~/.bashrc`, `~/.zshrc`, `~/.config/fish/config.fish`) or set it in your IDE's project environment variables.
-
-In **GoLand**: Run > Edit Configurations > Templates > Go Test > Environment variables > add `GOFLAGS=-toolexec=rewire`.
-
-### Build cache note
-
-Go's build cache keys on compilation inputs. When switching between toolexec and non-toolexec builds, you may need to run `go clean -cache` to force a recompile. This is typically a one-time step after initial setup.
-
-If you forget, `rewire.Func` will fail with a clear error message showing your current `GOFLAGS` and step-by-step fix instructions.
+This is simpler but means `go build` also rewrites targeted functions. The overhead is negligible — only functions you explicitly mock are affected, and the nil check is ~0 cost.
 
 ## Test isolation
 
-Each `go test` package compiles into a separate binary. This means:
+Each `go test` package compiles into a separate binary:
 - `foo`'s tests can mock `bar.Greet`
 - `baz`'s tests can use the real `bar.Greet`
 - No configuration needed — each test binary is independent
 
 Within a test package, `rewire.Func` uses `t.Cleanup` to restore the original after each test.
 
-## API
-
-### `rewire.Func` (recommended)
-
-```go
-rewire.Func(t, bar.Greet, func(name string) string {
-    return "mocked"
-})
-```
-
-Takes the original function by reference and a replacement with the same signature. Requires `-toolexec=rewire` to be active. Produces a clear error with setup instructions if toolexec is not active.
-
-### `rewire.Replace` (low-level)
-
-```go
-rewire.Replace(t, &bar.Mock_Greet, func(name string) string {
-    return "mocked"
-})
-```
-
-Directly swaps a mock variable by pointer. Useful if you need explicit control over mock variable names, but requires knowing the generated `Mock_` variable name.
-
 ## Limitations
 
-- **Exported functions only** — unexported functions are not rewritten
+- **Compiler intrinsics** — functions like `math.Abs`, `math.Sqrt`, `math.Floor` are replaced with CPU instructions by the compiler. Rewire detects these and fails with a clear error. Use non-intrinsic alternatives (e.g., `math.Pow` works fine).
 - **No methods** — only package-level functions (method support is planned)
 - **No generics** — generic functions are skipped
 - **No parallel mock safety** — parallel tests in the same package should not mock the same function with different replacements
-- **Same module only** — only packages within the same Go module are rewritten (third-party dependencies are not touched)
-- **Build cache** — switching between toolexec/non-toolexec requires `go clean -cache`
+- **Bodyless functions** — functions implemented in assembly (no Go body) cannot be rewritten
 
 ## Project structure
 
 ```
-cmd/rewire/          CLI entry point (toolexec mode + manual rewrite subcommand)
-pkg/rewire/          Test helper library (Func and Replace)
-internal/rewriter/   AST-based source rewriter
-internal/toolexec/   Toolexec wrapper with registration file generation
-example/             End-to-end example
-docs/                Design docs and decision log
+cmd/rewire/              CLI entry point (toolexec mode + rewrite subcommand)
+pkg/rewire/              Test helper library (Func and Replace)
+internal/rewriter/       AST-based source rewriter
+internal/toolexec/       Toolexec wrapper, test file scanner, intrinsic detection
+example/                 End-to-end examples (same-module + stdlib mocking)
+docs/                    Design docs and decision log
 ```
 
 ## License
