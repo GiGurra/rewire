@@ -25,7 +25,7 @@ Given production code:
 package bar
 
 func Greet(name string) string {
-    return fmt.Sprintf("Hello, %s!", name)
+    return "Hello, " + name + "!"
 }
 ```
 
@@ -92,7 +92,7 @@ func Greet(name string) string {
 }
 
 func _real_Greet(name string) string {
-    return fmt.Sprintf("Hello, %s!", name)
+    return "Hello, " + name + "!"
 }
 ```
 
