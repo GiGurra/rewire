@@ -1,8 +1,12 @@
 package foo
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -250,5 +254,140 @@ func TestLogger_LogCallTracking(t *testing.T) {
 	}
 	if messages[0] != "first" || messages[1] != "second" || messages[2] != "third" {
 		t.Errorf("unexpected messages: %v", messages)
+	}
+}
+
+// --- HTTPClient mock tests (external package types) ---
+
+func TestFetchBody_Success(t *testing.T) {
+	client := &MockHTTPClient{
+		DoFunc: func(ctx context.Context, req *http.Request) (*http.Response, error) {
+			if req.URL.String() != "https://example.com" {
+				t.Errorf("unexpected URL: %s", req.URL)
+			}
+			if req.Method != http.MethodGet {
+				t.Errorf("unexpected method: %s", req.Method)
+			}
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader("hello world")),
+			}, nil
+		},
+	}
+
+	body, err := FetchBody(context.Background(), client, "https://example.com")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if body != "hello world" {
+		t.Errorf("got %q, want %q", body, "hello world")
+	}
+}
+
+func TestFetchBody_RequestError(t *testing.T) {
+	client := &MockHTTPClient{
+		DoFunc: func(ctx context.Context, req *http.Request) (*http.Response, error) {
+			return nil, errors.New("connection refused")
+		},
+	}
+
+	_, err := FetchBody(context.Background(), client, "https://example.com")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
+func TestFetchBody_ContextCancelled(t *testing.T) {
+	client := &MockHTTPClient{
+		DoFunc: func(ctx context.Context, req *http.Request) (*http.Response, error) {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader("ok")),
+			}, nil
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	_, err := FetchBody(ctx, client, "https://example.com")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
+func TestFetchBody_RequestTracking(t *testing.T) {
+	var requests []*http.Request
+	client := &MockHTTPClient{
+		DoFunc: func(ctx context.Context, req *http.Request) (*http.Response, error) {
+			requests = append(requests, req)
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader("ok")),
+			}, nil
+		},
+	}
+
+	FetchBody(context.Background(), client, "https://a.com")
+	FetchBody(context.Background(), client, "https://b.com")
+
+	if len(requests) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(requests))
+	}
+	if requests[0].URL.String() != "https://a.com" {
+		t.Errorf("first request URL = %q, want %q", requests[0].URL, "https://a.com")
+	}
+	if requests[1].URL.String() != "https://b.com" {
+		t.Errorf("second request URL = %q, want %q", requests[1].URL, "https://b.com")
+	}
+}
+
+func TestUploadString_Success(t *testing.T) {
+	var capturedBody string
+	client := &MockHTTPClient{
+		UploadFunc: func(ctx context.Context, url string, body io.Reader) (int64, error) {
+			data, _ := io.ReadAll(body)
+			capturedBody = string(data)
+			return int64(len(data)), nil
+		},
+	}
+
+	n, err := UploadString(context.Background(), client, "https://example.com/upload", "payload data")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if n != 12 {
+		t.Errorf("got %d bytes, want 12", n)
+	}
+	if capturedBody != "payload data" {
+		t.Errorf("captured body = %q, want %q", capturedBody, "payload data")
+	}
+}
+
+func TestUploadString_Error(t *testing.T) {
+	client := &MockHTTPClient{
+		UploadFunc: func(ctx context.Context, url string, body io.Reader) (int64, error) {
+			return 0, errors.New("upload failed")
+		},
+	}
+
+	_, err := UploadString(context.Background(), client, "https://example.com/upload", "data")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
+func TestHTTPClient_UnsetMethodReturnsNil(t *testing.T) {
+	// Do is not set — should return nil, nil (zero values)
+	client := &MockHTTPClient{}
+	resp, err := client.Do(context.Background(), &http.Request{})
+	if resp != nil {
+		t.Errorf("expected nil response, got %v", resp)
+	}
+	if err != nil {
+		t.Errorf("expected nil error, got %v", err)
 	}
 }

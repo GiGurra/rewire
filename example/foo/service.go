@@ -1,7 +1,11 @@
 package foo
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 
 	"github.com/GiGurra/rewire/example/bar"
 )
@@ -44,4 +48,27 @@ func LogAndGreet(l bar.Logger, g bar.GreeterIface, name string) string {
 	result := g.Greet(name)
 	l.Logf("greeted %s: %s", name, result)
 	return result
+}
+
+// FetchBody uses an HTTPClient to GET a URL and return the body as a string.
+func FetchBody(ctx context.Context, client bar.HTTPClient, url string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("creating request: %w", err)
+	}
+	resp, err := client.Do(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("executing request: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("reading body: %w", err)
+	}
+	return string(body), nil
+}
+
+// UploadString uploads a string body to a URL and returns bytes written.
+func UploadString(ctx context.Context, client bar.HTTPClient, url, content string) (int64, error) {
+	return client.Upload(ctx, url, strings.NewReader(content))
 }

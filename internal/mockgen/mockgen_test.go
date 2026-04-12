@@ -213,6 +213,71 @@ type Service interface {
 	assertContains(t, result, "io.Reader")
 }
 
+func TestGenerateMock_ExternalPackagePointerTypes(t *testing.T) {
+	src := []byte(`package bar
+
+import (
+	"context"
+	"io"
+	"net/http"
+)
+
+type HTTPClient interface {
+	Do(ctx context.Context, req *http.Request) (*http.Response, error)
+	Upload(ctx context.Context, url string, body io.Reader) (int64, error)
+}
+`)
+	out, err := GenerateMock(src, "HTTPClient", "bar_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := string(out)
+	t.Log("Generated mock:\n" + result)
+
+	// Imports
+	assertContains(t, result, `"context"`)
+	assertContains(t, result, `"io"`)
+	assertContains(t, result, `"net/http"`)
+
+	// Struct fields preserve pointer types from external packages
+	assertContains(t, result, "*http.Request")
+	assertContains(t, result, "*http.Response")
+	assertContains(t, result, "io.Reader")
+	assertContains(t, result, "context.Context")
+
+	// Method signatures
+	assertContains(t, result, "func (m *MockHTTPClient) Do(ctx context.Context, req *http.Request)")
+	assertContains(t, result, "func (m *MockHTTPClient) Upload(ctx context.Context, url string, body io.Reader)")
+}
+
+func TestGenerateMock_OnlyReferencedImportsIncluded(t *testing.T) {
+	src := []byte(`package bar
+
+import (
+	"context"
+	"io"
+	"net/http"
+)
+
+type Simple interface {
+	Run(ctx context.Context) error
+}
+`)
+	out, err := GenerateMock(src, "Simple", "bar_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := string(out)
+	t.Log("Generated mock:\n" + result)
+
+	// Only context should be imported, not io or net/http
+	assertContains(t, result, `"context"`)
+	assertNotContains(t, result, `"io"`)
+	assertNotContains(t, result, `"net/http"`)
+}
+
 // --- helpers ---
 
 func assertContains(t *testing.T, s, substr string) {
