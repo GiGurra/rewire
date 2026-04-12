@@ -63,6 +63,28 @@ func TestGreetWith_RealMethod(t *testing.T) {
 	}
 }
 
+func TestGreet_CallCounter(t *testing.T) {
+	callCount := 0
+	var lastArg string
+
+	rewire.Func(t, bar.Greet, func(name string) string {
+		callCount++
+		lastArg = name
+		return "counted"
+	})
+
+	Welcome("Alice")
+	Welcome("Bob")
+	Welcome("Charlie")
+
+	if callCount != 3 {
+		t.Errorf("expected 3 calls, got %d", callCount)
+	}
+	if lastArg != "Charlie" {
+		t.Errorf("expected last arg %q, got %q", "Charlie", lastArg)
+	}
+}
+
 func TestWelcome_RealImplementation(t *testing.T) {
 	got := Welcome("Bob")
 	want := "Welcome! Hello, Bob!"
