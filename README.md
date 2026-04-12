@@ -76,7 +76,7 @@ func TestSquareRoot(t *testing.T) {
 }
 ```
 
-Requires `GOFLAGS="-toolexec=rewire"` to be set (see [Setup](#setup)).
+Requires `GOFLAGS="-toolexec=rewire"` to be set (see [Setup](#recommended-test-specific-environment)).
 
 </details>
 
@@ -96,7 +96,7 @@ Both pointer (`(*Type).Method`) and value (`Type.Method`) receivers are supporte
 
 Note: method mocks apply to **all instances** of the type, not a specific object. This is consistent with how function mocking works — the mock variable is package-level.
 
-Requires `GOFLAGS="-toolexec=rewire"` to be set (see [Setup](#setup)).
+Requires `GOFLAGS="-toolexec=rewire"` to be set (see [Setup](#recommended-test-specific-environment)).
 
 </details>
 
