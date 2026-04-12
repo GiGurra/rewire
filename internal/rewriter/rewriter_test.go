@@ -117,7 +117,7 @@ func (s *S) Hello() string {
 	if err == nil {
 		t.Fatal("expected error for method, got nil")
 	}
-	assertContains(t, err.Error(), "method")
+	assertContains(t, err.Error(), "not found")
 }
 
 func TestRewriteSource_NotFound(t *testing.T) {

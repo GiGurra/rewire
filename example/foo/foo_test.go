@@ -1,6 +1,7 @@
 package foo
 
 import (
+	"math"
 	"testing"
 
 	"github.com/GiGurra/rewire/example/bar"
@@ -16,6 +17,26 @@ func TestWelcome_WithMock(t *testing.T) {
 	want := "Welcome! Howdy, Alice"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestSquareRoot_WithMockedMathPow(t *testing.T) {
+	rewire.Func(t, math.Pow, func(x, y float64) float64 {
+		return 42
+	})
+
+	got := SquareRoot(9)
+	want := 42.0
+	if got != want {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestSquareRoot_RealMathPow(t *testing.T) {
+	got := SquareRoot(9)
+	want := 3.0
+	if got != want {
+		t.Errorf("got %v, want %v", got, want)
 	}
 }
 

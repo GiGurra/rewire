@@ -45,9 +45,9 @@ func RewriteSource(src []byte, funcName string) ([]byte, error) {
 		if !ok {
 			continue
 		}
-		if fd.Name.Name == funcName {
-			if fd.Recv != nil {
-				return nil, fmt.Errorf("rewire does not support methods yet (function %q has a receiver)", funcName)
+		if fd.Name.Name == funcName && fd.Recv == nil {
+			if fd.Body == nil {
+				return nil, fmt.Errorf("function %q has no body (assembly or go:linkname stub)", funcName)
 			}
 			target = fd
 			targetIdx = i
@@ -87,15 +87,17 @@ func RewriteSource(src []byte, funcName string) ([]byte, error) {
 		callArgs = strings.Join(paramCallArgs, ", ")
 	}
 
+	// Use _rewire_mock as the local variable name to avoid shadowing
+	// any function parameters (e.g. math.Abs has parameter 'f')
 	var mockBody string
 	if hasResults {
-		mockBody = fmt.Sprintf(`if f := %s; f != nil {
-		return f(%s)
+		mockBody = fmt.Sprintf(`if _rewire_mock := %s; _rewire_mock != nil {
+		return _rewire_mock(%s)
 	}
 	return %s(%s)`, mockVarName, callArgs, realFuncName, callArgs)
 	} else {
-		mockBody = fmt.Sprintf(`if f := %s; f != nil {
-		f(%s)
+		mockBody = fmt.Sprintf(`if _rewire_mock := %s; _rewire_mock != nil {
+		_rewire_mock(%s)
 		return
 	}
 	%s(%s)`, mockVarName, callArgs, realFuncName, callArgs)
@@ -189,6 +191,9 @@ func RewriteAllExported(src []byte) ([]byte, error) {
 		}
 		if fd.Recv != nil {
 			continue // skip methods
+		}
+		if fd.Body == nil {
+			continue // skip assembly/linkname stubs
 		}
 		if fd.Type.TypeParams != nil && fd.Type.TypeParams.NumFields() > 0 {
 			continue // skip generic functions
