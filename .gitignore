@@ -11,6 +11,9 @@
 *.test
 *.out
 
+# MkDocs
+site/
+
 # OS
 .DS_Store
 Thumbs.db

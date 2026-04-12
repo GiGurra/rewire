@@ -1,0 +1,66 @@
+# Setup
+
+Function and method mocking requires `GOFLAGS="-toolexec=rewire"` to be set. Interface mock generation (`rewire mock`) does not require any setup.
+
+## Recommended: test-specific environment
+
+Keep test builds in a separate cache so `go build` and `go test` never interfere.
+
+### Terminal (alias in shell profile)
+
+```bash
+alias gotest='GOFLAGS="-toolexec=rewire" GOCACHE="$HOME/.cache/rewire-test" go test'
+```
+
+Then run tests with:
+
+```bash
+gotest ./...
+```
+
+### GoLand
+
+Run > Edit Configurations > Templates > Go Test > Environment variables:
+
+```
+GOFLAGS=-toolexec=rewire
+GOCACHE=/Users/<you>/.cache/rewire-test
+```
+
+This applies to all Go Test run configurations, including click-to-run from the gutter.
+
+### VS Code
+
+Add to `.vscode/settings.json` or user settings:
+
+```json
+"go.testEnvVars": {
+    "GOFLAGS": "-toolexec=rewire",
+    "GOCACHE": "${env:HOME}/.cache/rewire-test"
+}
+```
+
+### What this gives you
+
+- `go build` uses the default cache — clean production binaries, no rewire artifacts
+- `go test` (via alias or IDE) uses a separate cache — rewire active, no cache conflicts
+
+## Alternative: global GOFLAGS
+
+If you don't mind the minimal overhead (a nil check per mocked function in production builds):
+
+```bash
+export GOFLAGS="-toolexec=rewire"
+```
+
+This is simpler but means `go build` also rewrites targeted functions. The overhead is probably negligible in most situations — only functions you explicitly mock are affected, and it's just a nil check.
+
+## First-time cache clean
+
+After installing rewire for the first time (or after changing rewire versions), clean the build cache so packages get recompiled through rewire:
+
+```bash
+go clean -cache
+```
+
+This only needs to happen once. After that, Go's build cache handles incremental rebuilds correctly.

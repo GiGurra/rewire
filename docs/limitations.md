@@ -1,0 +1,42 @@
+# Limitations
+
+These limitations apply to compile-time function and method mocking (toolexec). Interface mock generation is not affected.
+
+## Compiler intrinsics
+
+Functions like `math.Abs`, `math.Sqrt`, and `math.Floor` are replaced with CPU instructions by the Go compiler at the **call site**. Even though rewire rewrites the function body, callers bypass it entirely — the compiler emits hardware instructions (e.g., `FABS` on arm64) instead of a function call.
+
+Rewire detects these automatically and fails with a clear error message. Use non-intrinsic alternatives where possible (e.g., `math.Pow` works fine).
+
+## Method mocks are global
+
+When you mock a method like `(*Server).Handle`, the mock applies to **all instances** of `*Server`, not a specific object. This is inherent to the approach — the mock variable is package-level.
+
+For per-instance behavior, use [interface mocks](interface-mocks.md) instead.
+
+## No generic functions
+
+Generic functions (those with type parameters) are skipped during rewriting. Go doesn't allow generic package-level variables, so `var Mock_Map[T, U any]` isn't valid Go.
+
+## No parallel mock safety
+
+Parallel tests in the same package should not mock the **same function** with different replacements. The mock variable is shared, so two parallel tests setting it will race.
+
+Two parallel tests mocking **different** functions is fine — there's no contention.
+
+!!! note
+    This only matters for tests using `t.Parallel()`. Sequential tests (the default) don't have this issue since `t.Cleanup` restores the original between tests.
+
+## Bodyless functions
+
+Functions implemented in assembly (no Go body) cannot be rewritten. These are typically low-level runtime or math functions. Rewire will fail with an error if you try to mock one.
+
+## Build cache considerations
+
+Go's build cache keys on compilation inputs including the toolexec binary. If you change rewire versions, you may need to clean the cache:
+
+```bash
+go clean -cache
+```
+
+Using a separate test cache (`GOCACHE`) avoids conflicts between `go build` and `go test`. See [Setup](setup.md) for details.
