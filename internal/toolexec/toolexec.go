@@ -302,13 +302,22 @@ func generateRegistration(compileArgs []string, targets mockTargets) (string, er
 	b.WriteString("func init() {\n")
 	for _, e := range entries {
 		for _, fn := range e.funcNames {
-			fmt.Fprintf(&b, "\trewire.Register(%q, &%s.Mock_%s)\n",
-				e.importPath+"."+fn, e.alias, fn)
+			fmt.Fprintf(&b, "\trewire.Register(%q, &%s.%s)\n",
+				e.importPath+"."+fn, e.alias, mockVarName(fn))
 		}
 	}
 	b.WriteString("}\n")
 
 	return b.String(), nil
+}
+
+// mockVarName converts a target name to the corresponding Mock_ variable name.
+// "Func"              → "Mock_Func"
+// "(*Server).Handle"  → "Mock_Server_Handle"
+// "Point.String"      → "Mock_Point_String"
+func mockVarName(targetName string) string {
+	name := strings.NewReplacer("(*", "", ")", "", ".", "_").Replace(targetName)
+	return "Mock_" + name
 }
 
 func extractPackageName(src []byte) string {

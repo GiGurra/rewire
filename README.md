@@ -62,6 +62,21 @@ func TestWelcome_Real(t *testing.T) {
 
 Pass the original function and its replacement. No mock variable names, no generated types, no interface wrappers.
 
+### Mocking methods
+
+Methods work too — use Go's method expression syntax:
+
+```go
+func TestGreetWith_MockedMethod(t *testing.T) {
+    rewire.Func(t, (*bar.Greeter).Greet, func(g *bar.Greeter, name string) string {
+        return "Mocked, " + name
+    })
+    // All calls to (*Greeter).Greet use the mock in this test
+}
+```
+
+Note: method mocks apply to **all instances** of the type, not a specific object. This is consistent with how function mocking works — the mock variable is package-level.
+
 ### Mocking stdlib and external packages
 
 Rewire works with any package, not just your own:
@@ -152,7 +167,7 @@ Within a test package, `rewire.Func` uses `t.Cleanup` to restore the original af
 ## Limitations
 
 - **Compiler intrinsics** — functions like `math.Abs`, `math.Sqrt`, `math.Floor` are replaced with CPU instructions by the compiler. Rewire detects these and fails with a clear error. Use non-intrinsic alternatives (e.g., `math.Pow` works fine).
-- **No methods** — only package-level functions (method support is planned)
+- **Method mocks are global** — method mocks apply to all instances of a type, not per-object. This is consistent with function mocking.
 - **No generics** — generic functions are skipped
 - **No parallel mock safety** — parallel tests in the same package should not mock the same function with different replacements
 - **Bodyless functions** — functions implemented in assembly (no Go body) cannot be rewritten

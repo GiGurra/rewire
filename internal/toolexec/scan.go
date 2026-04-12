@@ -139,25 +139,63 @@ func scanFileForMockCalls(path string) mockTargets {
 			return true
 		}
 
-		funcSel, ok := call.Args[1].(*ast.SelectorExpr)
-		if !ok {
-			return true
-		}
-		pkgIdent, ok := funcSel.X.(*ast.Ident)
-		if !ok {
+		importPath, targetName := extractMockTarget(call.Args[1], imports)
+		if importPath == "" {
 			return true
 		}
 
-		importPath, ok := imports[pkgIdent.Name]
-		if !ok {
-			return true
-		}
-
-		targets[importPath] = append(targets[importPath], funcSel.Sel.Name)
+		targets[importPath] = append(targets[importPath], targetName)
 		return true
 	})
 
 	return targets
+}
+
+// extractMockTarget extracts the import path and target name from the second
+// argument of a rewire.Func call. Handles:
+//   - pkg.Func           → (importPath, "Func")
+//   - pkg.Type.Method    → (importPath, "Type.Method")
+//   - (*pkg.Type).Method → (importPath, "(*Type).Method")
+func extractMockTarget(expr ast.Expr, imports map[string]string) (importPath, targetName string) {
+	sel, ok := expr.(*ast.SelectorExpr)
+	if !ok {
+		return "", ""
+	}
+	methodName := sel.Sel.Name
+
+	// Case 1: pkg.Func
+	if pkgIdent, ok := sel.X.(*ast.Ident); ok {
+		if ip, ok := imports[pkgIdent.Name]; ok {
+			return ip, methodName
+		}
+		return "", ""
+	}
+
+	// Case 2: pkg.Type.Method (value receiver)
+	if innerSel, ok := sel.X.(*ast.SelectorExpr); ok {
+		if pkgIdent, ok := innerSel.X.(*ast.Ident); ok {
+			if ip, ok := imports[pkgIdent.Name]; ok {
+				return ip, innerSel.Sel.Name + "." + methodName
+			}
+		}
+		return "", ""
+	}
+
+	// Case 3: (*pkg.Type).Method (pointer receiver)
+	if parenExpr, ok := sel.X.(*ast.ParenExpr); ok {
+		if starExpr, ok := parenExpr.X.(*ast.StarExpr); ok {
+			if innerSel, ok := starExpr.X.(*ast.SelectorExpr); ok {
+				if pkgIdent, ok := innerSel.X.(*ast.Ident); ok {
+					if ip, ok := imports[pkgIdent.Name]; ok {
+						return ip, "(*" + innerSel.Sel.Name + ")." + methodName
+					}
+				}
+			}
+		}
+		return "", ""
+	}
+
+	return "", ""
 }
 
 func dedupe(ss []string) []string {

@@ -13,3 +13,7 @@ func Welcome(name string) string {
 func SquareRoot(x float64) float64 {
 	return math.Pow(x, 0.5)
 }
+
+func GreetWith(g *bar.Greeter, name string) string {
+	return g.Greet(name)
+}

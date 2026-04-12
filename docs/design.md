@@ -178,9 +178,11 @@ Within a test package, `rewire.Func` uses `t.Cleanup` to restore the mock variab
 
 Generate an overlay JSON file mapping source files to rewritten versions. `gopls` would see mock variables and provide autocomplete. A `rewire daemon` could keep the overlay in sync.
 
-### Method support
+### Method support (implemented)
 
-Methods need special handling — the mock variable type includes the receiver, and the wrapper needs to forward it.
+Methods use `(*Type).Method` or `Type.Method` syntax, matching Go method expressions and `runtime.FuncForPC` naming conventions. The rewriter generates a mock variable with the receiver as the first parameter (`Mock_Server_Handle func(*Server, string) string`), a wrapper method that forwards the receiver to the mock, and a `_real_` method that preserves the original body. The scanner detects both pointer receiver (`(*pkg.Type).Method`) and value receiver (`pkg.Type.Method`) patterns in test files.
+
+Method mocks are global — all instances of a type share one mock variable. Per-instance mocking would require a map lookup on every call and a different API; for per-instance behavior, Go interfaces are the idiomatic approach.
 
 ### Generic function support
 

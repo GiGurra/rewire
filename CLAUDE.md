@@ -33,7 +33,7 @@ After changing rewire source: always `go install ./cmd/rewire/` before running t
   - `Replace[F any](t, &target, replacement)` — low-level API, directly swaps a mock var by pointer.
   - `Register(funcName, mockVarPtr)` — called by generated init() code, not by users.
 - `internal/rewriter/rewriter.go` — AST rewriter:
-  - `RewriteSource` — rewrites a single named function. Skips methods and bodyless functions.
+  - `RewriteSource` — rewrites a single named function or method. Accepts `"Func"`, `"(*Type).Method"`, or `"Type.Method"` syntax. Skips bodyless functions.
   - `RewriteAllExported` — rewrites all eligible exported functions (used by the `rewrite` CLI subcommand).
   - `ListExportedFunctions` — returns names of functions eligible for rewriting.
 - `internal/toolexec/toolexec.go` — Toolexec wrapper:
@@ -42,7 +42,7 @@ After changing rewire source: always `go install ./cmd/rewire/` before running t
   - For test compilations: generates `_rewire_init_test.go` that registers mock var pointers.
 - `internal/toolexec/scan.go` — Pre-scans `_test.go` files for `rewire.Func` calls. Builds a map of import path -> function names. Results cached per build (keyed on parent PID).
 - `internal/toolexec/intrinsics.go` — Detects compiler intrinsic functions by parsing `$GOROOT/src/cmd/compile/internal/ssagen/intrinsics.go`. Intrinsics are replaced by CPU instructions at the call site, bypassing any wrapper.
-- `example/` — End-to-end examples: `bar.Greet` (same-module) and `math.Pow` (stdlib) mocking.
+- `example/` — End-to-end examples: `bar.Greet` (same-module), `math.Pow` (stdlib), and `(*bar.Greeter).Greet` (method) mocking.
 
 ## Key design decisions
 
@@ -52,6 +52,7 @@ After changing rewire source: always `go install ./cmd/rewire/` before running t
 - **Registry-based Func API**: `rewire.Func(t, bar.Greet, replacement)` — user never types mock variable names. Registration is generated directly from mock targets during test compilation.
 - **Intrinsic detection**: Parses the Go compiler's own intrinsics.go to detect functions that can't be mocked (replaced by CPU instructions at call sites). Fails with a clear error.
 - **`_rewire_mock` variable name**: The wrapper uses `_rewire_mock` as its local variable to avoid shadowing function parameters (e.g., math functions commonly use `f` for float64).
+- **Method support**: Methods use `(*Type).Method` / `Type.Method` syntax (matching Go method expressions and `runtime.FuncForPC` naming). Mock variable names include the type: `Mock_Server_Handle`. The mock function receives the receiver as the first argument. Method mocks are global (all instances share one mock variable).
 
 ## Conventions
 

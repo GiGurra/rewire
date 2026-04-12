@@ -120,6 +120,56 @@ func (s *S) Hello() string {
 	assertContains(t, err.Error(), "not found")
 }
 
+func TestRewriteSource_PointerReceiverMethod(t *testing.T) {
+	src := []byte(`package bar
+
+type Server struct{}
+
+func (s *Server) Handle(req string) string {
+	return "handled " + req
+}
+`)
+	out, err := RewriteSource(src, "(*Server).Handle")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := string(out)
+	t.Log("Rewritten source:\n" + result)
+
+	// Mock var includes receiver as first param
+	assertContains(t, result, "var Mock_Server_Handle func")
+	assertContains(t, result, "*Server")
+	// Wrapper is still a method on *Server
+	assertContains(t, result, "func (s *Server) Handle(")
+	// Real impl preserved as method
+	assertContains(t, result, "_real_Server_Handle")
+	// Original body preserved
+	assertContains(t, result, `"handled " + req`)
+}
+
+func TestRewriteSource_ValueReceiverMethod(t *testing.T) {
+	src := []byte(`package bar
+
+type Point struct{ X, Y int }
+
+func (p Point) String() string {
+	return "point"
+}
+`)
+	out, err := RewriteSource(src, "Point.String")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := string(out)
+	t.Log("Rewritten source:\n" + result)
+
+	assertContains(t, result, "var Mock_Point_String func")
+	assertContains(t, result, "func (p Point) String(")
+	assertContains(t, result, "_real_Point_String")
+}
+
 func TestRewriteSource_NotFound(t *testing.T) {
 	src := []byte(`package bar
 
