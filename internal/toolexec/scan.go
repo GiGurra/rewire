@@ -28,7 +28,7 @@ func loadOrScanMockTargets(moduleRoot string) mockTargets {
 	cacheFile := filepath.Join(cacheDir, "mock_targets.json")
 	lockPath := filepath.Join(cacheDir, "mock_targets.lock")
 
-	os.MkdirAll(cacheDir, 0755)
+	_ = os.MkdirAll(cacheDir, 0755)
 
 	// Acquire file lock — first process scans, others wait
 	fl := flock.New(lockPath)
@@ -36,7 +36,7 @@ func loadOrScanMockTargets(moduleRoot string) mockTargets {
 		// Can't acquire lock — fall back to scanning without lock
 		return scanAllTestFiles(moduleRoot)
 	}
-	defer fl.Unlock()
+	defer func() { _ = fl.Unlock() }()
 
 	// Under lock: check if cache was written by another process
 	if data, err := os.ReadFile(cacheFile); err == nil {
@@ -50,7 +50,7 @@ func loadOrScanMockTargets(moduleRoot string) mockTargets {
 	targets := scanAllTestFiles(moduleRoot)
 
 	if data, err := json.Marshal(targets); err == nil {
-		os.WriteFile(cacheFile, data, 0644)
+		_ = os.WriteFile(cacheFile, data, 0644)
 	}
 
 	return targets
@@ -60,7 +60,7 @@ func loadOrScanMockTargets(moduleRoot string) mockTargets {
 func scanAllTestFiles(moduleRoot string) mockTargets {
 	targets := mockTargets{}
 
-	filepath.WalkDir(moduleRoot, func(path string, d fs.DirEntry, err error) error {
+	_ = filepath.WalkDir(moduleRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			if d != nil && d.IsDir() {
 				name := d.Name()

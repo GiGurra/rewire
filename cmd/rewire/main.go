@@ -94,7 +94,7 @@ func runRewrite(params *RewriteParams, _ *cobra.Command, _ []string) {
 		}
 		fmt.Fprintf(os.Stderr, "rewired %d function(s) in %s\n", len(params.Func), params.File)
 	} else {
-		os.Stdout.Write(src)
+		_, _ = os.Stdout.Write(src)
 	}
 }
 
@@ -122,6 +122,6 @@ func runMock(params *MockParams, _ *cobra.Command, _ []string) {
 			os.Exit(1)
 		}
 	} else {
-		os.Stdout.Write(out)
+		_, _ = os.Stdout.Write(out)
 	}
 }

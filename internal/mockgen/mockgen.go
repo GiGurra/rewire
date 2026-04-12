@@ -322,6 +322,6 @@ func isVariadicFunc(ft *ast.FuncType) bool {
 
 func nodeToString(fset *token.FileSet, node ast.Node) string {
 	var buf bytes.Buffer
-	printer.Fprint(&buf, fset, node)
+	_ = printer.Fprint(&buf, fset, node)
 	return buf.String()
 }

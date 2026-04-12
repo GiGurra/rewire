@@ -17,20 +17,26 @@ func TestIntrinsicFunctionProducesError(t *testing.T) {
 	// Create a temp module with a test that tries to mock math.Abs
 	tmpDir := t.TempDir()
 
-	os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte(
+	if err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte(
 		"module testmod\n\ngo 1.21\n\nrequire github.com/GiGurra/rewire v0.0.0\n\n"+
 			"replace github.com/GiGurra/rewire => "+mustAbs("../..")+"\n",
-	), 0644)
+	), 0644); err != nil {
+		t.Fatal(err)
+	}
 
-	os.MkdirAll(filepath.Join(tmpDir, "pkg"), 0755)
-	os.WriteFile(filepath.Join(tmpDir, "pkg", "pkg.go"), []byte(`package pkg
+	if err := os.MkdirAll(filepath.Join(tmpDir, "pkg"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "pkg", "pkg.go"), []byte(`package pkg
 
 import "math"
 
 func Run() float64 { return math.Abs(-1) }
-`), 0644)
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
 
-	os.WriteFile(filepath.Join(tmpDir, "pkg", "pkg_test.go"), []byte(`package pkg
+	if err := os.WriteFile(filepath.Join(tmpDir, "pkg", "pkg_test.go"), []byte(`package pkg
 
 import (
 	"math"
@@ -41,7 +47,9 @@ import (
 func TestAbs(t *testing.T) {
 	rewire.Func(t, math.Abs, func(x float64) float64 { return 0 })
 }
-`), 0644)
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	// Tidy the module
 	tidy := exec.Command("go", "mod", "tidy")
@@ -53,7 +61,7 @@ func TestAbs(t *testing.T) {
 	// Clear build cache to ensure math is recompiled through toolexec
 	clean := exec.Command("go", "clean", "-cache")
 	clean.Dir = tmpDir
-	clean.Run()
+	_ = clean.Run()
 
 	// Run go test with toolexec — should fail with a clear error
 	cmd := exec.Command("go", "test", "-toolexec=rewire", "-count=1", "./pkg/")

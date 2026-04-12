@@ -161,9 +161,7 @@ func TestMigrateKey_GetFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !errors.Is(err, errors.Unwrap(err)) {
-		// Just check it wraps the message
-	}
+	// err wraps "db down" — we just check it's non-nil above
 }
 
 func TestMigrateKey_SetFails(t *testing.T) {
@@ -336,8 +334,8 @@ func TestFetchBody_RequestTracking(t *testing.T) {
 		},
 	}
 
-	FetchBody(context.Background(), client, "https://a.com")
-	FetchBody(context.Background(), client, "https://b.com")
+	_, _ = FetchBody(context.Background(), client, "https://a.com")
+	_, _ = FetchBody(context.Background(), client, "https://b.com")
 
 	if len(requests) != 2 {
 		t.Fatalf("expected 2 requests, got %d", len(requests))

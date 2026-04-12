@@ -2,9 +2,10 @@ package toolexec
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
+	"strings"
 )
 
 // intrinsicFunctions returns the set of functions that the Go compiler
@@ -14,7 +15,7 @@ import (
 //
 // The list is parsed from $GOROOT/src/cmd/compile/internal/ssagen/intrinsics.go.
 func intrinsicFunctions() map[string]map[string]bool {
-	goroot := runtime.GOROOT()
+	goroot := goroot()
 	if goroot == "" {
 		return nil
 	}
@@ -26,6 +27,15 @@ func intrinsicFunctions() map[string]map[string]bool {
 	}
 
 	return parseIntrinsics(string(data))
+}
+
+// goroot returns the GOROOT path by running `go env GOROOT`.
+func goroot() string {
+	out, err := exec.Command("go", "env", "GOROOT").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // parseIntrinsics extracts addF("pkg", "func", ...) patterns from the

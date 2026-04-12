@@ -135,7 +135,7 @@ func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, isT
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating temp dir: %w", err)
 	}
-	cleanup := func() { os.RemoveAll(tmpDir) }
+	cleanup := func() { _ = os.RemoveAll(tmpDir) }
 
 	newArgs := make([]string, len(args))
 	copy(newArgs, args)
@@ -191,7 +191,7 @@ func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, isT
 				cleanup()
 				return nil, nil, fmt.Errorf(
 					"function %s.%s cannot be mocked — not found in any source file.\n"+
-						"  The function may be implemented in assembly or excluded by build constraints.",
+						"  The function may be implemented in assembly or excluded by build constraints",
 					pkgPath, fn)
 			}
 		}
@@ -318,15 +318,6 @@ func generateRegistration(compileArgs []string, targets mockTargets) (string, er
 func mockVarName(targetName string) string {
 	name := strings.NewReplacer("(*", "", ")", "", ".", "_").Replace(targetName)
 	return "Mock_" + name
-}
-
-func extractPackageName(src []byte) string {
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "", src, parser.PackageClauseOnly)
-	if err != nil {
-		return ""
-	}
-	return f.Name.Name
 }
 
 func execTool(tool string, args []string) int {
