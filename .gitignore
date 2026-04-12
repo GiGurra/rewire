@@ -1,0 +1,13 @@
+# IDE
+.idea/
+.vscode/
+
+# Go
+/rewire
+*.exe
+*.test
+*.out
+
+# OS
+.DS_Store
+Thumbs.db
