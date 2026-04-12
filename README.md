@@ -12,8 +12,11 @@ One tool, both approaches. Production code on disk is never modified — for fun
 ## Quick start
 
 ```bash
-# Install
+# Install the rewire binary
 go install github.com/GiGurra/rewire/cmd/rewire@latest
+
+# Add the test library to your module
+go get github.com/GiGurra/rewire/pkg/rewire
 
 # Clean the Go build cache (needed once, so rewire can rewrite cached packages)
 go clean -cache
