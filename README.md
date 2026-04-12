@@ -14,6 +14,9 @@ Inspired by Erlang's [meck](https://github.com/eproxus/meck).
 # Install
 go install github.com/GiGurra/rewire/cmd/rewire@latest
 
+# Clean the Go build cache (needed once, so rewire can rewrite cached packages)
+go clean -cache
+
 # Run tests with rewire
 GOFLAGS="-toolexec=rewire" go test ./...
 ```
