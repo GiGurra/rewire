@@ -8,6 +8,7 @@ import (
 	"go/parser"
 	"go/printer"
 	"go/token"
+	"reflect"
 	"strings"
 )
 
@@ -79,7 +80,7 @@ func RewriteSource(src []byte, funcName string) ([]byte, error) {
 		if isMethod {
 			return nil, fmt.Errorf("generic methods are not yet supported (function %q)", funcName)
 		}
-		return rewriteGenericFunction(src, fset, file, target, funcName)
+		return rewriteGenericFunction(fset, file, target, targetIdx, funcName)
 	}
 
 	// Extract signature info
@@ -213,6 +214,13 @@ func %s%s(%s) %s {
 		return nil, fmt.Errorf("parsing generated wrapper (this is a bug in rewire):\n%s\nerror: %w", genSrc, err)
 	}
 
+	// Clear positions on the spliced decls so format.Node doesn't try to
+	// align them against the parent file's fset — otherwise qualified
+	// selectors like `Rect._real_Rect_Area` print split across lines.
+	for _, d := range genFile.Decls {
+		clearNodePositions(d)
+	}
+
 	// Rename the original to _real_
 	target.Name.Name = realFuncName
 
@@ -257,13 +265,13 @@ func %s%s(%s) %s {
 //
 //	func _real_Map[T, U any](in []T, f func(T) U) []U { /* original body */ }
 //
-// Unlike the non-generic path this works at the text level: it computes
-// the original target function's byte range, substitutes a hand-built
-// replacement block in its place, ensures reflect+sync are imported, and
-// runs the whole thing through go/format.Source. The AST-splice trick
-// used for non-generics breaks down here because we need to inject new
-// imports and the fset position juggling gets ugly.
-func rewriteGenericFunction(src []byte, fset *token.FileSet, file *ast.File, target *ast.FuncDecl, funcName string) ([]byte, error) {
+// Uses the same AST-splice strategy as the non-generic path, with one
+// extra step: clearPositions zeros every token.Pos on the spliced decls
+// so the printer doesn't try to align them against the parent file's
+// fset (which was the cause of mangled `sync.\n\tMap` formatting on an
+// earlier attempt). reflect+sync imports are injected via ensureImport,
+// which also works via position-cleared AST nodes.
+func rewriteGenericFunction(fset *token.FileSet, file *ast.File, target *ast.FuncDecl, targetIdx int, funcName string) ([]byte, error) {
 	params := ensureParamNames(target.Type.Params)
 	hasResults := target.Type.Results != nil && len(target.Type.Results.List) > 0
 	isVariadic := isVariadicFunc(target.Type)
@@ -274,7 +282,7 @@ func rewriteGenericFunction(src []byte, fset *token.FileSet, file *ast.File, tar
 	wrapperName := funcName
 
 	// Print "[T, U any]" and "[T, U]" — the constrained form for decls
-	// and the bare form for type-argument references.
+	// and the bare form for type-argument references inside the wrapper.
 	typeParamsSrc, err := fieldListToString(fset, target.Type.TypeParams)
 	if err != nil {
 		return nil, fmt.Errorf("printing type params: %w", err)
@@ -331,17 +339,11 @@ func rewriteGenericFunction(src []byte, fset *token.FileSet, file *ast.File, tar
 		realAliasBody = fmt.Sprintf("%s(%s)", realFuncName, callArgs)
 	}
 
-	// Print the original function body so we can re-emit it under the
-	// renamed _real_ function.
-	origBodySrc, err := nodeToString(fset, target.Body)
-	if err != nil {
-		return nil, fmt.Errorf("printing original body: %w", err)
-	}
+	// Generate the new decls as a package snippet, parse in a fresh
+	// fset, then clear positions before splicing into the parent file.
+	genSrc := fmt.Sprintf(`package %s
 
-	// The full replacement block that will substitute for the original
-	// target function in the source. No package line, no imports — those
-	// live in the rest of the file.
-	replacement := fmt.Sprintf(`var %s sync.Map
+var %s sync.Map
 
 func %s%s(%s) %s {
 	%s
@@ -350,124 +352,132 @@ func %s%s(%s) %s {
 func %s%s(%s) %s {
 	%s
 }
-
-func %s%s(%s) %s %s`,
+`, file.Name.Name,
 		mockVarName,
 		realAliasName, typeParamsDecl, paramsSrc, resultsSrc, realAliasBody,
 		wrapperName, typeParamsDecl, paramsSrc, resultsSrc, wrapperBody,
-		realFuncName, typeParamsDecl, paramsSrc, resultsSrc, origBodySrc,
 	)
 
-	// Byte offsets of the original target function in src.
-	startOff := fset.Position(target.Pos()).Offset
-	endOff := fset.Position(target.End()).Offset
-	if startOff < 0 || endOff > len(src) || startOff >= endOff {
-		return nil, fmt.Errorf("internal error: invalid offsets for target %q: [%d:%d)", funcName, startOff, endOff)
+	genFset := token.NewFileSet()
+	genFile, err := parser.ParseFile(genFset, "", genSrc, parser.ParseComments)
+	if err != nil {
+		return nil, fmt.Errorf("parsing generated generic wrapper (this is a bug in rewire):\n%s\nerror: %w", genSrc, err)
 	}
+	if len(genFile.Decls) != 3 {
+		return nil, fmt.Errorf("internal error: expected 3 generated decls, got %d", len(genFile.Decls))
+	}
+	newMock := genFile.Decls[0]        // var Mock_X sync.Map
+	newRealAlias := genFile.Decls[1]   // func Real_X[...](...)
+	newWrapper := genFile.Decls[2]     // func X[...](...)
+	clearNodePositions(newMock)
+	clearNodePositions(newRealAlias)
+	clearNodePositions(newWrapper)
+
+	// Merge reflect + sync into the target file's import block.
+	ensureImport(file, "reflect")
+	ensureImport(file, "sync")
+
+	// Rename the original function to _real_<Name> so it remains a
+	// generic function with the same body.
+	target.Name.Name = realFuncName
+
+	// Replace target in-place: Mock var + Real alias + wrapper + renamed original.
+	newDecls := make([]ast.Decl, 0, len(file.Decls)+3)
+	newDecls = append(newDecls, file.Decls[:targetIdx]...)
+	newDecls = append(newDecls, newMock)
+	newDecls = append(newDecls, newRealAlias)
+	newDecls = append(newDecls, newWrapper)
+	newDecls = append(newDecls, target)
+	newDecls = append(newDecls, file.Decls[targetIdx+1:]...)
+	file.Decls = newDecls
 
 	var buf bytes.Buffer
-	buf.Write(src[:startOff])
-	buf.WriteString(replacement)
-	buf.Write(src[endOff:])
-	result := buf.Bytes()
-
-	// Add reflect+sync imports if not already present.
-	result, err = ensureImportsText(result, "reflect", "sync")
-	if err != nil {
-		return nil, fmt.Errorf("ensuring imports: %w", err)
+	if err := format.Node(&buf, fset, file); err != nil {
+		return nil, fmt.Errorf("formatting output: %w", err)
 	}
-
-	formatted, err := format.Source(result)
-	if err != nil {
-		return nil, fmt.Errorf("formatting generic rewrite output: %w\n---\n%s", err, result)
-	}
-	return formatted, nil
+	return buf.Bytes(), nil
 }
 
-// ensureImportsText adds any of the given import paths that aren't already
-// imported by src. It operates on source text because the rest of the
-// generic rewrite path is also text-based — trying to mix AST mutation
-// with text splicing gets tangled.
-func ensureImportsText(src []byte, pkgs ...string) ([]byte, error) {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "", src, parser.ParseComments)
-	if err != nil {
-		return nil, fmt.Errorf("parsing for import check: %w", err)
-	}
+// clearNodePositions neutralizes token.Pos fields on nodes reachable from
+// n so that the printer doesn't try to resolve foreign fset positions when
+// these nodes are spliced into a file from a different fset. Without it,
+// qualified selectors like `sync.Map` or `Rect._real_X` end up split
+// across lines because the printer sees the two halves as living on
+// different logical rows.
+//
+// Caveat: some Pos fields carry *semantic* information via zero vs
+// non-zero (e.g. CallExpr.Ellipsis signals variadic, GenDecl.Lparen
+// signals parenthesized block form). We must not flatten those to zero,
+// or we'd lose the semantic distinction. So: preserve zero-ness — fields
+// that were NoPos stay NoPos, fields that were non-zero get set to Pos(1)
+// (any stable non-zero value works since the actual location is what we
+// want to discard).
+//
+// ast.Inspect follows only positional children, so it doesn't traverse
+// the Obj/Scope back-references that would otherwise cause infinite loops.
+func clearNodePositions(n ast.Node) {
+	posType := reflect.TypeOf(token.NoPos)
+	ast.Inspect(n, func(x ast.Node) bool {
+		if x == nil {
+			return false
+		}
+		v := reflect.ValueOf(x)
+		if v.Kind() == reflect.Pointer {
+			v = v.Elem()
+		}
+		if v.Kind() != reflect.Struct {
+			return true
+		}
+		t := v.Type()
+		for i := 0; i < v.NumField(); i++ {
+			f := v.Field(i)
+			if t.Field(i).Type != posType || !f.CanSet() {
+				continue
+			}
+			if f.Int() != int64(token.NoPos) {
+				f.SetInt(1)
+			}
+		}
+		return true
+	})
+}
 
-	existing := map[string]bool{}
+// ensureImport adds an import of pkgPath to file if it is not already
+// present. Uses position-cleared AST nodes so the surrounding import
+// block formats cleanly regardless of the parent file's fset state.
+func ensureImport(file *ast.File, pkgPath string) {
 	for _, imp := range file.Imports {
-		existing[strings.Trim(imp.Path.Value, `"`)] = true
-	}
-
-	var toAdd []string
-	for _, p := range pkgs {
-		if !existing[p] {
-			toAdd = append(toAdd, p)
+		if strings.Trim(imp.Path.Value, `"`) == pkgPath {
+			return
 		}
 	}
-	if len(toAdd) == 0 {
-		return src, nil
+	newSpec := &ast.ImportSpec{
+		Path: &ast.BasicLit{
+			Kind:  token.STRING,
+			Value: fmt.Sprintf("%q", pkgPath),
+		},
 	}
+	clearNodePositions(newSpec)
 
-	// Find an existing import decl we can extend, or plan a new one.
-	var importDecl *ast.GenDecl
+	// Extend the first existing import decl, or create one.
 	for _, decl := range file.Decls {
 		if gen, ok := decl.(*ast.GenDecl); ok && gen.Tok == token.IMPORT {
-			importDecl = gen
-			break
-		}
-	}
-
-	var insertText strings.Builder
-	var insertOff int
-
-	if importDecl != nil {
-		// Add new specs before the closing paren (or convert single-line
-		// form to block form).
-		endOff := fset.Position(importDecl.End()).Offset
-		if importDecl.Lparen == token.NoPos {
-			// Single-spec form: `import "foo"` — replace entirely with a block.
-			startOff := fset.Position(importDecl.Pos()).Offset
-			oldSpec, ok := importDecl.Specs[0].(*ast.ImportSpec)
-			if !ok {
-				return nil, fmt.Errorf("unexpected import spec kind")
+			gen.Specs = append(gen.Specs, newSpec)
+			// Force parenthesized block form if it wasn't already.
+			if gen.Lparen == token.NoPos {
+				gen.Lparen = token.Pos(1)
 			}
-			insertText.WriteString("import (\n")
-			insertText.WriteString("\t")
-			insertText.WriteString(oldSpec.Path.Value)
-			insertText.WriteString("\n")
-			for _, p := range toAdd {
-				fmt.Fprintf(&insertText, "\t%q\n", p)
-			}
-			insertText.WriteString(")")
-			return spliceBytes(src, startOff, endOff, insertText.String()), nil
+			file.Imports = append(file.Imports, newSpec)
+			return
 		}
-		// Block form: insert new specs before `)`.
-		insertOff = fset.Position(importDecl.Rparen).Offset
-		for _, p := range toAdd {
-			fmt.Fprintf(&insertText, "\t%q\n", p)
-		}
-		return spliceBytes(src, insertOff, insertOff, insertText.String()), nil
 	}
-
-	// No import decl at all — insert a new one right after the package clause.
-	insertOff = fset.Position(file.Name.End()).Offset
-	insertText.WriteString("\n\nimport (\n")
-	for _, p := range toAdd {
-		fmt.Fprintf(&insertText, "\t%q\n", p)
+	newDecl := &ast.GenDecl{
+		Tok:    token.IMPORT,
+		Lparen: token.Pos(1),
+		Specs:  []ast.Spec{newSpec},
 	}
-	insertText.WriteString(")")
-	return spliceBytes(src, insertOff, insertOff, insertText.String()), nil
-}
-
-func spliceBytes(src []byte, start, end int, replacement string) []byte {
-	var out bytes.Buffer
-	out.Grow(len(src) + len(replacement))
-	out.Write(src[:start])
-	out.WriteString(replacement)
-	out.Write(src[end:])
-	return out.Bytes()
+	file.Decls = append([]ast.Decl{newDecl}, file.Decls...)
+	file.Imports = append(file.Imports, newSpec)
 }
 
 // RewriteFile reads a file, rewrites the named function, and returns the new source.

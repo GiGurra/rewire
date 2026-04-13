@@ -437,11 +437,14 @@ func ensureStdImportsInCfg(args []string, pkgs ...string) ([]string, func(), err
 		return nil, nil, fmt.Errorf("creating patched importcfg: %w", err)
 	}
 	if _, err := tmp.Write(buf.Bytes()); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
 		return nil, nil, fmt.Errorf("writing patched importcfg: %w", err)
 	}
-	tmp.Close()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmp.Name())
+		return nil, nil, fmt.Errorf("closing patched importcfg: %w", err)
+	}
 
 	newArgs := make([]string, len(args))
 	copy(newArgs, args)
