@@ -128,6 +128,16 @@ func TestReal_CallableFromInsideMockClosure(t *testing.T) {
 	}
 }
 
+// rewire.Real alone should trigger rewriting, with no rewire.Func call
+// needed. strings.ToUpper is only referenced by Real in this module.
+func TestReal_TriggersRewritingWithoutFunc(t *testing.T) {
+	realUpper := rewire.Real(t, strings.ToUpper)
+	got := realUpper("hello")
+	if got != "HELLO" {
+		t.Errorf("real strings.ToUpper(%q) = %q, want %q", "hello", got, "HELLO")
+	}
+}
+
 // Call counting: verify that the spy delegates N times to the real
 // implementation, one per call through filepath.Abs.
 func TestReal_SpyCountsRealCalls(t *testing.T) {

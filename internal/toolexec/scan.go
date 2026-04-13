@@ -118,7 +118,10 @@ func scanFileForMockCalls(path string) mockTargets {
 		return nil
 	}
 
-	// Walk AST looking for rewire.Func(t, pkg.FuncName, ...) calls
+	// Walk AST looking for rewire.Func / rewire.Real / rewire.Restore calls.
+	// All three take the target function as their second argument (after t),
+	// and any one of them should trigger rewriting so the wrapper and the
+	// Real_ alias exist.
 	targets := mockTargets{}
 	ast.Inspect(f, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
@@ -131,7 +134,13 @@ func scanFileForMockCalls(path string) mockTargets {
 			return true
 		}
 		ident, ok := sel.X.(*ast.Ident)
-		if !ok || ident.Name != rewireLocalName || sel.Sel.Name != "Func" {
+		if !ok || ident.Name != rewireLocalName {
+			return true
+		}
+		switch sel.Sel.Name {
+		case "Func", "Real", "Restore":
+			// process below
+		default:
 			return true
 		}
 

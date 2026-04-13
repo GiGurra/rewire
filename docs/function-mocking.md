@@ -115,7 +115,7 @@ This is the same idea as Mockito's spy pattern. A few properties worth knowing:
 
 - **Order doesn't matter.** You can call `rewire.Real` before or after `rewire.Func`, and even from *inside* the mock closure — the returned function value is always the real implementation, never the wrapper.
 - **It works for methods too.** Pass a method expression: `rewire.Real(t, (*bar.Greeter).Greet)` returns a `func(*bar.Greeter, string) string` that invokes the real method when called with a receiver.
-- **The function must be rewritten.** `rewire.Real` only works for functions that are targeted by a `rewire.Func` call somewhere in the test module. If nothing mocks it, rewire never emits the real alias — in that case, just call the function directly.
+- **`rewire.Real` by itself triggers rewriting.** You don't need a matching `rewire.Func` call. Referencing a function from any of `rewire.Func`, `rewire.Real`, or `rewire.Restore` is enough for the pre-scan to add it to the rewrite list, so the real alias is always available when you ask for it.
 
 ## Restoring mocks mid-test
 
