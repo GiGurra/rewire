@@ -6,12 +6,45 @@
 
 > **Experimental** — this project is in early development. Both the implementation and APIs may change at any time. Use at your own risk.
 
-A complete mocking solution for Go:
+A **compile-time mocking toolkit** for Go. Mock anything — free functions, stdlib, third-party, methods, specific instances, interfaces — all with one small API, no interface extraction, no dependency-injection plumbing, no code generation, no runtime patching.
 
-- **Replace any function or method at test time** — package-level functions, struct methods, stdlib, third-party. No interfaces, no dependency injection, no unsafe runtime patches. This is what other mocking libraries can't do.
-- **Generate mock structs for interfaces** — for traditional dependency-injection style testing, like other Go mocking libraries.
+```go
+// Mock a stdlib function:
+rewire.Func(t, os.Getwd, func() (string, error) { return "/mocked", nil })
 
-One tool, both approaches. Production code on disk is never modified — rewire intercepts the Go compiler via `-toolexec` and emits what's needed only in-memory during compilation. This covers function/method mocking (rewritten wrappers around the targeted functions) and, as of Phase 1, interface mocks via `rewire.NewMock[T]` — no `go:generate`, no committed mock files. An older CLI mock generator is still available for users who prefer committed mock source.
+// Mock a struct method, globally:
+rewire.Func(t, (*bar.Server).Handle, func(s *bar.Server, req string) string { return "mocked" })
+
+// Mock a struct method, for one specific receiver only:
+rewire.InstanceMethod(t, s1, (*bar.Server).Handle, func(s *bar.Server, req string) string { return "s1-only" })
+
+// Create a mock of an interface with zero committed files:
+greeter := rewire.NewMock[bar.GreeterIface](t)
+rewire.InstanceMethod(t, greeter, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string { return "hi" })
+
+// Multi-pattern stubs with call-count verification:
+e := expect.For(t, bar.Greet)
+e.On("Alice").Returns("hi Alice").Times(1)
+e.OnAny().Returns("hi other")
+```
+
+One package, one API surface. Every scenario above uses the same underlying mechanism: **rewire intercepts the Go compiler via `-toolexec` and rewrites or synthesizes code in-memory during compilation.** Your source on disk is never modified. Nothing is patched at runtime. No `unsafe`, no platform-specific code, no inline-breaking tricks.
+
+## Why this combination is unusual
+
+Go has plenty of mocking libraries, but each one has historically picked *one* spot on this grid and stayed there:
+
+| Capability | Typical Go approach | rewire |
+|---|---|---|
+| Mock a stdlib or third-party function | Runtime binary patching (unsafe, platform-specific, breaks under inlining) | Compile-time rewrite (safe, portable, verified compatible with inlining) |
+| Mock a struct method without touching production code | Extract an interface + dependency injection | Method expression — no interface, no DI |
+| Mock *one specific instance* of a type | Extract an interface, inject per instance | `rewire.InstanceMethod` — scoped by receiver pointer |
+| Mock an interface | `go:generate` a mock file, commit it, regenerate on every change | `rewire.NewMock[T]` — backing struct synthesized at compile time, nothing committed |
+| Multi-pattern expectations with call-count verification | A separate DSL tied to one of the above styles | `expect.For` / `expect.ForInstance` — the same DSL works on *all* of the above |
+
+Each cell of rewire's column uses the same compile-time rewriting machinery underneath, so they compose. You can mix global mocks, per-instance mocks, and interface mocks in a single test, all with the same verbs.
+
+The inspiration is Erlang's [meck](https://github.com/eproxus/meck) — where you can replace any function in any module without touching its definition. Rewire gets to the same destination via the Go compiler's `-toolexec` hook instead of runtime hot-patching.
 
 ## Quick start
 
@@ -25,26 +58,18 @@ go get github.com/GiGurra/rewire/pkg/rewire
 # Clean the Go build cache (needed once, so rewire can rewrite cached packages)
 go clean -cache
 
-# Run tests with rewire (for function/method mocking)
+# Run tests with rewire
 GOFLAGS="-toolexec=rewire" go test ./...
 ```
 
-<details>
-<summary><strong>Function mocking</strong> — replace any function at test time, no code changes required</summary>
+See [Setup](#setup--ide-and-terminal-configuration) below for how to wire it into your IDE cleanly so `go build` and `go test` stay on separate caches.
 
-Here's a fully self-contained example — no production code to set up, just stdlib. We mock `os.Getwd` and then call `filepath.Abs`, which internally calls `os.Getwd` to resolve a relative path:
+<details>
+<summary><strong>Function mocking</strong> — any function, including stdlib and third-party</summary>
+
+Here's a fully self-contained example. We mock `os.Getwd` and then call `filepath.Abs`, which internally calls `os.Getwd` to resolve a relative path. Neither function is in your project, and you change nothing about them.
 
 ```go
-package foo
-
-import (
-    "os"
-    "path/filepath"
-    "testing"
-
-    "github.com/GiGurra/rewire/pkg/rewire"
-)
-
 func TestFilepathAbs_WithMockedOsGetwd(t *testing.T) {
     rewire.Func(t, os.Getwd, func() (string, error) {
         return "/mocked", nil
@@ -55,49 +80,7 @@ func TestFilepathAbs_WithMockedOsGetwd(t *testing.T) {
 }
 ```
 
-Notice what's happening: `filepath.Abs` lives in `path/filepath`, it calls `os.Getwd` which lives in `os`, and neither package belongs to your project. Rewire rewrites `os.Getwd` at compile time, so when `filepath.Abs` reaches the call site, it gets the mocked version. No interfaces, no dependency injection, no wrappers.
-
-It works the same way on your own code:
-
-```go
-// bar/bar.go — never modified
-package bar
-
-func Greet(name string) string {
-    return "Hello, " + name + "!"
-}
-```
-
-```go
-// foo/foo.go — never modified
-package foo
-
-import "example/bar"
-
-func Welcome(name string) string {
-    return "Welcome! " + bar.Greet(name)
-}
-```
-
-```go
-// foo/foo_test.go
-func TestWelcome_WithMock(t *testing.T) {
-    rewire.Func(t, bar.Greet, func(name string) string {
-        return "Howdy, " + name
-    })
-
-    got := Welcome("Alice")
-    // got == "Welcome! Howdy, Alice"
-    // Welcome still calls bar.Greet as normal — but bar.Greet now runs the mock.
-}
-
-func TestWelcome_Real(t *testing.T) {
-    // No mock here. Welcome("Bob") == "Welcome! Hello, Bob!"
-    // Mocks are per-test; the previous test does not leak.
-}
-```
-
-Pass the original function and its replacement. No mock variable names, no generated types, no interface wrappers. Mocks are automatically restored after each test via `t.Cleanup`.
+The same API works on your own code, on third-party packages, on stdlib internals that aren't exposed as interfaces. Pass the original function and its replacement. No mock variable names, no generated types, no wrappers. Mocks auto-restore via `t.Cleanup`.
 
 **Generic functions** — pass the instantiation you want to mock, and only that instantiation is replaced:
 
@@ -105,7 +88,7 @@ Pass the original function and its replacement. No mock variable names, no gener
 rewire.Func(t, bar.Map[int, string], func(in []int, f func(int) string) []string {
     return []string{"mocked"}
 })
-// bar.Map[float64, bool] still runs the real implementation in the same test
+// bar.Map[float64, bool] still runs the real body in the same test
 ```
 
 **Spy pattern** — use `rewire.Real` to capture the pre-rewrite implementation and delegate to it from inside your mock:
@@ -118,36 +101,60 @@ rewire.Func(t, bar.Greet, func(name string) string {
 })
 ```
 
-**Mid-test cleanup** — `rewire.Restore(t, fn)` ends a mock early if you want the real implementation back before the test finishes. Safe to call multiple times.
+**Mid-test cleanup** — `rewire.Restore(t, target)` ends a mock early if you want the real implementation back before the test finishes. Idempotent.
 
-Requires `GOFLAGS="-toolexec=rewire"` to be set (see [Setup](#recommended-test-specific-environment)).
+See [Function Mocking](docs/function-mocking.md) for the full feature set.
 
 </details>
 
 <details>
-<summary><strong>Method mocking</strong> — replace struct methods using Go method expression syntax</summary>
+<summary><strong>Method mocking</strong> — global or per-instance, no interface required</summary>
+
+### Global (all instances)
 
 ```go
 func TestGreetWith_MockedMethod(t *testing.T) {
     rewire.Func(t, (*bar.Greeter).Greet, func(g *bar.Greeter, name string) string {
         return "Mocked, " + name
     })
-    // All calls to (*Greeter).Greet use the mock in this test
+    // Every *bar.Greeter.Greet call in this test returns the mock.
 }
 ```
 
-Both pointer (`(*Type).Method`) and value (`Type.Method`) receivers are supported. The replacement function receives the receiver as its first argument.
+Both pointer (`(*Type).Method`) and value (`Type.Method`) receivers work. The replacement takes the receiver as its first argument.
 
-Note: method mocks apply to **all instances** of the type, not a specific object. This is consistent with how function mocking works — the mock variable is package-level.
+### Per-instance
 
-Requires `GOFLAGS="-toolexec=rewire"` to be set (see [Setup](#recommended-test-specific-environment)).
+For tests where only one specific receiver should be mocked:
+
+```go
+s1 := &bar.Server{Name: "primary"}
+s2 := &bar.Server{Name: "secondary"}
+
+rewire.InstanceMethod(t, s1, (*bar.Server).Handle, func(s *bar.Server, req string) string {
+    return "primary-mock: " + req
+})
+
+s1.Handle("ping") // "primary-mock: ping"  — per-instance mock
+s2.Handle("ping") // real Handle body      — s2 is untouched
+```
+
+Dispatch order inside the wrapper is per-instance → global → real, so per-instance and global mocks compose. You can `rewire.Restore(t, s1)` to drop every per-instance mock bound to `s1` at once, or `rewire.RestoreInstanceMethod(t, s1, target)` for one specific entry.
+
+Works for generic methods too:
+
+```go
+rewire.InstanceMethod(t, c1, (*bar.Container[int]).Add, func(c *bar.Container[int], v int) {
+    // swallow — c1 never actually appends
+})
+```
+
+See [Method Mocking](docs/method-mocking.md) for the full feature set.
 
 </details>
 
 <details>
-<summary><strong>Interface mocks</strong> — `rewire.NewMock[T]` (no go:generate, no committed files)</summary>
-
-Rewire ships two styles of interface mocking. The newer one — `rewire.NewMock[T]` — synthesizes the backing struct at compile time via toolexec. **No `go:generate`, no committed mock files.** Just reference the interface in a test and it works:
+<summary><strong>Interface mocks</strong> — <code>rewire.NewMock[T]</code>, no go:generate, no committed files</summary>
 
 ```go
 func TestService_GreetingFlow(t *testing.T) {
@@ -163,31 +170,67 @@ func TestService_GreetingFlow(t *testing.T) {
 }
 ```
 
-Two mocks of the same interface are scoped independently — stubs on one don't leak to the other. Unstubbed methods return zero values. `rewire.Restore(t, mock)` clears every stub on a mock.
+No `go:generate` step. No `mock_*_test.go` files committed to the repo. The toolexec wrapper scans test files for `rewire.NewMock[X]` references, parses the interface's source, and synthesizes a backing struct into the test package's compile args. The struct satisfies `X`, routes method calls through the same per-instance dispatch tables that back `rewire.InstanceMethod`, and disappears the moment the test binary finishes.
 
-For tests that need multi-pattern stubbing, argument predicates, call-count bounds, or automatic "was this actually called?" verification, the [expectation DSL](docs/expectations.md) has an `expect.ForInstance(t, mock, bar.GreeterIface.Greet)` entry point that wraps `NewMock` mocks (and per-instance concrete methods) with the same rule-builder API as `expect.For`.
+- Two mocks of the same interface are scoped independently — stubs on one don't leak to the other.
+- Unstubbed methods return zero values.
+- `rewire.Restore(t, mock)` clears every stub on a mock.
 
-The toolexec wrapper scans test files for `rewire.NewMock[X]` references, parses the interface's source, and emits a backing struct into the test package's compile args. You never see the generated code and never commit it — it's the same mechanism rewire uses to emit method-mock wrappers and per-instance dispatch tables.
+**Current scope (Phase 1):** non-generic interfaces, methods using builtin or already-qualified types. Embedded interfaces, types from the interface's own declaring package, and generic interfaces are Phase 2+ items (rejected with a clear error until then).
 
-**Current scope (Phase 1):** non-generic interfaces, methods using builtin or already-qualified types. Embedded interfaces, types from the interface's own declaring package, and generic interfaces are Phase 2+ items (rejected with a clear error for now).
-
-See [Interface Mocks](docs/interface-mocks.md) for the full feature set and the older `rewire mock` CLI.
-
-> **Note on the older CLI.** Rewire also supports a traditional `rewire mock` CLI, typically invoked via `go:generate`, that produces a committed `mock_*_test.go` file. It's still fully supported, but once the `rewire.NewMock[T]` path reaches feature parity (embedded interfaces, same-package types, generics) rewire's own CLI generator is a candidate for deprecation. This is purely about rewire's internal surface area — it's not a statement about the `go:generate` ecosystem in general.
+Rewire also ships an older `rewire mock` CLI that writes a committed mock file — useful when you want to review the generated code. It's still fully supported; over time the `rewire.NewMock[T]` path is intended to become rewire's canonical interface-mock API. See [Interface Mocks](docs/interface-mocks.md) for both styles.
 
 </details>
 
 <details>
-<summary><strong>How it works</strong> — toolexec compile-time rewriting</summary>
+<summary><strong>Expectation DSL</strong> — multi-pattern stubs, call counts, predicates, async wait</summary>
 
-1. **Pre-scan** — rewire scans `_test.go` files in your module for `rewire.Func` calls and builds a target list (e.g., `bar.Greet`, `math.Pow`)
-2. **Targeted rewrite** — when the compiler processes a package containing targeted functions, rewire rewrites only those functions with a `Mock_` variable and nil-check wrapper
-3. **Registration** — when compiling a test package, rewire generates an `init()` that registers mock variable pointers in a runtime registry
-4. **Runtime swap** — `rewire.Func` uses `runtime.FuncForPC` to resolve the function name, looks up the mock variable pointer, and swaps it via `reflect`. `t.Cleanup` restores the original
+For tests that need more than a single closure — multiple rules, argument predicates, call-count verification — the `expect` package layers a fluent DSL on top of any rewire mock:
 
-Only functions explicitly listed in `rewire.Func` calls are rewritten. Everything else passes through untouched.
+```go
+import "github.com/GiGurra/rewire/pkg/rewire/expect"
 
-The rewrite transformation (only exists during compilation):
+e := expect.For(t, bar.Greet)
+e.On("Alice").Returns("hi Alice")
+e.On("Bob").Returns("hi Bob")
+e.Match(func(name string) bool { return strings.HasPrefix(name, "admin_") }).Returns("admin")
+e.OnAny().Returns("hi other")
+```
+
+- **First-fit matching** — rules are walked in declaration order, first match wins.
+- **Typed predicates** — `.Match(func(...))` takes a real Go function, fully type-checked.
+- **Call-count bounds** — `.Times(n)`, `.AtLeast(n)`, `.Never()`, `.Maybe()`. The default for `.On` and `.Match` is `.AtLeast(1)` — so "was this mock actually called?" verification is free.
+- **Async support** — `.Wait(n, timeout)` blocks until the rule has matched n times, for tests involving background goroutines.
+- **Spy-friendly** — `.DoFunc(func(...))` runs arbitrary code on each call, useful for capturing arguments or delegating to the real implementation.
+
+The same DSL works on per-instance and interface mocks via `expect.ForInstance(t, instance, target)`:
+
+```go
+greeter := rewire.NewMock[bar.GreeterIface](t)
+
+e := expect.ForInstance(t, greeter, bar.GreeterIface.Greet)
+e.On(greeter, "Alice").Returns("hi Alice")
+e.OnAny().Returns("hi other")
+```
+
+One rule-builder API — `.On` / `.Match` / `.OnAny` / `.Returns` / `.DoFunc` / `.Times` / `.AtLeast` / `.Never` / `.Maybe` / `.Wait` — spans free functions, concrete methods (global), concrete methods (per-instance), and interface methods on `NewMock` instances.
+
+See [Expectation DSL](docs/expectations.md) for the full reference.
+
+</details>
+
+<details>
+<summary><strong>How it works</strong> — compile-time rewriting via <code>-toolexec</code></summary>
+
+1. **Pre-scan** — rewire walks `_test.go` files in your module and collects every `rewire.Func` / `rewire.InstanceMethod` / `rewire.NewMock[T]` reference. This builds a target list.
+2. **Targeted rewrite** — when the Go compiler processes a package containing targeted functions or methods, rewire intercepts it via `-toolexec` and rewrites exactly those functions to route through a package-level mock variable and a nil-check wrapper. Everything else in the package compiles normally.
+3. **Interface mock generation** — for each `rewire.NewMock[X]` target, rewire parses `X`'s source at compile time and synthesizes a concrete backing struct into the test package's compile args.
+4. **Registration** — when compiling a test package, rewire generates an `init()` file that registers mock variable pointers (and per-instance dispatch tables, and mock factories) in a runtime registry.
+5. **Runtime swap** — `rewire.Func` / `rewire.InstanceMethod` use `runtime.FuncForPC` to resolve the target name, look up the registry entry, and install the replacement via `reflect`. `t.Cleanup` restores the original.
+
+Only functions and methods explicitly referenced in rewire calls are rewritten. Everything else passes through the compiler untouched — no whole-module overhead.
+
+The rewrite transformation for a plain function (only exists during compilation):
 
 ```go
 var Mock_Greet func(name string) string
@@ -204,21 +247,23 @@ func _real_Greet(name string) string {
 }
 ```
 
+Inlining is preserved — the wrapper is small enough to inline, and CI verifies this on every build.
+
 </details>
 
 <details>
-<summary><strong>Setup</strong> — IDE and terminal configuration for toolexec</summary>
+<summary><strong>Setup</strong> — IDE and terminal configuration</summary>
 
-### Recommended: test-specific environment
+### Recommended: test-specific cache
 
 Keep test builds in a separate cache so `go build` and `go test` never interfere:
 
-**Terminal (alias in shell profile):**
+**Terminal (shell alias):**
 ```bash
 alias gotest='GOFLAGS="-toolexec=rewire" GOCACHE="$HOME/.cache/rewire-test" go test'
 ```
 
-**GoLand:** Run > Edit Configurations > Templates > Go Test > Environment variables:
+**GoLand:** Run → Edit Configurations → Templates → Go Test → Environment variables:
 ```
 GOFLAGS=-toolexec=rewire
 GOCACHE=/Users/<you>/.cache/rewire-test
@@ -232,38 +277,39 @@ GOCACHE=/Users/<you>/.cache/rewire-test
 }
 ```
 
-With this setup:
-- `go build` uses the default cache — clean production binaries, no rewire artifacts
-- `go test` (via alias or IDE) uses a separate cache — rewire active, no cache conflicts
+With this setup `go build` uses the default cache (clean production binaries, no rewire artifacts) and `go test` uses a separate cache (rewire active, no conflicts).
+
+**Cleaning the rewire cache:** `go clean -cache` wipes whichever cache `$GOCACHE` currently points at, so to clean the rewire-test cache specifically:
+
+```bash
+GOCACHE="$HOME/.cache/rewire-test" go clean -cache
+```
 
 ### Alternative: global GOFLAGS
-
-If you don't mind the minimal overhead (a nil check per mocked function in production builds):
 
 ```bash
 export GOFLAGS="-toolexec=rewire"
 ```
 
-This is simpler but means `go build` also rewrites targeted functions. The overhead is probably negligible in most situations — only functions you explicitly mock are affected, and it's just a nil check.
+Simpler, but `go build` now also runs through the rewire toolexec. The overhead is tiny (a nil check per mocked function) but the split-cache setup is cleaner for day-to-day use.
 
 </details>
 
 <details>
-<summary><strong>Limitations</strong> — function/method mocking (toolexec)</summary>
+<summary><strong>Limitations</strong></summary>
 
-These limitations apply to compile-time function/method mocking only, not interface mock generation. For per-instance method stubs (different behavior per object) rewire ships `rewire.InstanceMethod` — see [Per-instance method mocks](https://gigurra.github.io/rewire/method-mocking/#per-instance-method-mocks).
-
-- **Compiler intrinsics** — functions like `math.Abs`, `math.Sqrt`, `math.Floor` are replaced with CPU instructions by the compiler. Rewire detects these and fails with a clear error. Use non-intrinsic alternatives (e.g., `math.Pow` works fine).
-- **No parallel mock safety** — parallel tests in the same package should not mock the same function with different replacements. The mock variable is shared across parallel goroutines.
-- **Bodyless functions** — functions implemented in assembly (no Go body) cannot be rewritten.
+- **Compiler intrinsics** — `math.Abs`, `math.Sqrt`, `math.Floor` and friends are replaced by CPU instructions at the call site, bypassing any wrapper. Rewire detects these and fails with a clear error. Non-intrinsic alternatives (`math.Pow`, for example) work fine.
+- **Bodyless functions** — functions implemented in assembly have no Go source to rewrite. Detected and rejected at compile time.
+- **Parallel mocks on the same target** — two `t.Parallel()` tests that mock the same function with different replacements will race on the package-level mock variable. Rewire is single-test-at-a-time per target.
+- **Interface mocks (Phase 1)** — don't yet handle embedded interfaces, types from the interface's own declaring package, or generic interfaces. Rejected with clear errors until Phase 2 lands.
 
 </details>
 
 ## Acknowledgements
 
-This project is 100% vibe coded — AST rewriting and compiler toolchains are way outside my comfort zone. Built entirely with [Claude Code](https://claude.ai).
+100% vibe coded — AST rewriting and compiler toolchains are way outside my comfort zone. Built entirely with [Claude Code](https://claude.ai).
 
-Inspired by Erlang's [meck](https://github.com/eproxus/meck), although the underlying mechanism is entirely different.
+Inspired by Erlang's [meck](https://github.com/eproxus/meck). The user experience is similar; the underlying mechanism is entirely different (compile-time AST rewriting vs. runtime hot-patching).
 
 ## License
 
