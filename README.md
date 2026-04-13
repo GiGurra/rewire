@@ -30,8 +30,6 @@ e.OnAny().Returns("hi other")
 
 One package, one API surface. Every scenario above uses the same underlying mechanism: **rewire intercepts the Go compiler via `-toolexec` and rewrites or synthesizes code in-memory during compilation.** Your source on disk is never modified. Nothing is patched at runtime. No `unsafe`, no platform-specific code, no inline-breaking tricks.
 
-The inspiration is Erlang's [meck](https://github.com/eproxus/meck) — where you can replace any function in any module without touching its definition. Rewire gets to the same destination via the Go compiler's `-toolexec` hook instead of runtime hot-patching.
-
 ## Quick start
 
 ```bash
