@@ -1,18 +1,12 @@
 # Limitations
 
-These limitations apply to compile-time function and method mocking (toolexec). Interface mock generation is not affected.
+These limitations apply to compile-time function and method mocking (toolexec). Interface mock generation is not affected — if you need per-instance method stubs or any of the behaviors below, use [interface mocks](interface-mocks.md) instead.
 
 ## Compiler intrinsics
 
 Functions like `math.Abs`, `math.Sqrt`, and `math.Floor` are replaced with CPU instructions by the Go compiler at the **call site**. Even though rewire rewrites the function body, callers bypass it entirely — the compiler emits hardware instructions (e.g., `FABS` on arm64) instead of a function call.
 
 Rewire detects these automatically and fails with a clear error message. Use non-intrinsic alternatives where possible (e.g., `math.Pow` works fine).
-
-## Method mocks are global
-
-When you mock a method like `(*Server).Handle`, the mock applies to **all instances** of `*Server`, not a specific object. This is inherent to the approach — the mock variable is package-level.
-
-For per-instance behavior, use [interface mocks](interface-mocks.md) instead.
 
 ## Method-level type parameters
 
