@@ -60,5 +60,6 @@ Inspired by Erlang's [meck](https://github.com/eproxus/meck), although the under
 - [Getting Started](getting-started.md) — install and run your first mock
 - [Function Mocking](function-mocking.md) — replace any function at test time
 - [Method Mocking](method-mocking.md) — mock struct methods
+- [Expectations DSL](expectations.md) — declarative `.On(args).Returns(v).Times(n)` style mocking (opt-in)
 - [Interface Mocks](interface-mocks.md) — generate mock structs for interfaces
 - [Roadmap](roadmap.md) — planned work and known gaps vs other mocking libraries

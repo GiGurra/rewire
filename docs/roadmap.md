@@ -23,15 +23,31 @@ Not exhaustively verified: PGO-guided inlining and functions marked `//go:noinli
 
 ### 2. Expectation DSL / argument matchers
 
-**Status:** design TBD.
+**Status:** ✅ shipped as opt-in `pkg/rewire/expect` package.
 
-Rewire currently gives you a closure and expects you to write counters, slices, and `if`-conditions by hand. Libraries like gomock provide:
+Rewire's core API still gives you a closure-based style, but `import "github.com/GiGurra/rewire/pkg/rewire/expect"` opts you into a declarative rule-builder on top of `rewire.Func`:
 
-- `gomock.Any()`, `gomock.Eq(...)`, regex matchers
-- `.Times(n)`, `.MinTimes(n)`, `.MaxTimes(n)` with automatic verification at test end
-- `gomock.InOrder(c1, c2, c3)` for call ordering
+```go
+e := expect.For(t, bar.Greet)
+e.On("Alice").Returns("hi Alice")
+e.On("Bob").Returns("hi Bob")
+e.Match(func(n string) bool {
+    return strings.HasPrefix(n, "admin_")
+}).Returns("admin")
+e.OnAny().Returns("hi other")
+```
 
-This is fine for light mocking but tedious for tests that verify many interactions. The question is whether a lightweight layer on top of `rewire.Func` (e.g., `rewire.Expect(t, fn).Returns(v).Times(3)`) would be worth the complexity, or whether we should explicitly recommend the "write your own closure" approach as the rewire style. Leaning toward the latter.
+Features:
+
+- **Multiple patterns** — `.On(literals)`, `.Match(typed predicate)`, `.OnAny()` fallback. First-fit dispatch in declaration order.
+- **Responses** — `.Returns(vals...)` for fixed values, `.DoFunc(fn)` for typed callbacks that compute input-dependent returns.
+- **Call-count bounds** — `.Times(n)`, `.AtLeast(n)`, `.Never()`, `.Maybe()`. Strict default for `.On` and `.Match` (must match ≥ 1 call) gives automatic "was the mock actually called?" verification for free.
+- **Automatic verification** — `t.Cleanup` checks every rule's bound and reports violations with source locations.
+- **Works for methods, generic functions, and generic methods** — same API, because `expect.For` delegates to `rewire.Func` underneath.
+- **No IDE red squiggles** — everything lives in a normal Go package that `gopls` resolves like any other.
+- **Opt-in** — users who don't import the package pay nothing.
+
+See [Expectations DSL](expectations.md) for the full story.
 
 ### 3. Generic functions
 

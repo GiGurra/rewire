@@ -40,6 +40,7 @@ nav:
   - Getting Started: getting-started.md
   - Function Mocking: function-mocking.md
   - Method Mocking: method-mocking.md
+  - Expectations DSL: expectations.md
   - Interface Mocks: interface-mocks.md
   - How It Works: how-it-works.md
   - Setup: setup.md

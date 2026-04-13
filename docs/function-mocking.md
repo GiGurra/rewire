@@ -93,6 +93,21 @@ func TestWelcome_Real(t *testing.T) {
 
 `Welcome` never changes, and `bar.Greet` never changes on disk. At compile time rewire rewrites `bar.Greet` so it checks a package-level mock variable first — when the mock is set, `Welcome` transparently sees the replacement instead.
 
+## Want something more declarative?
+
+If you find yourself writing closures with manual counters to verify call counts, capture arguments, or dispatch on multiple patterns, the [Expectations DSL](expectations.md) gives you a more declarative API on top of `rewire.Func`:
+
+```go
+import "github.com/GiGurra/rewire/pkg/rewire/expect"
+
+e := expect.For(t, bar.Greet)
+e.On("Alice").Returns("hi Alice")
+e.On("Bob").Returns("hi Bob")
+e.OnAny().Returns("hi other")
+```
+
+Opt-in — if you don't import `expect`, you pay nothing.
+
 ## Spying: delegating to the real implementation
 
 Sometimes you want the mock to run *in addition to* the real function, not *instead of* it — for counting calls, adding audit behavior, or wrapping the real output. `rewire.Real` returns the pre-rewrite implementation so you can call it from inside your mock:
