@@ -6,7 +6,8 @@
 
 > **Experimental** — this project is in early development. Both the implementation and APIs may change at any time. Use at your own risk.
 
-A **compile-time mocking toolkit** for Go. Mock anything — free functions, stdlib, third-party, methods, specific instances, interfaces — all with one small API, no interface extraction, no dependency-injection plumbing, no code generation, no runtime patching.
+Mock anything — free functions, stdlib, third-party, methods, specific instances, interfaces.
+No interface extraction, no dependency-injection plumbing, no `go generate` code generation, no runtime patching.
 
 ```go
 // Mock a stdlib function:
