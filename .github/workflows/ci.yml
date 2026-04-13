@@ -30,7 +30,7 @@ jobs:
           version: latest
 
       - name: Run unit tests (no toolexec)
-        run: go test ./internal/...
+        run: go test ./internal/... ./pkg/...
 
       - name: Install rewire binary
         run: go install ./cmd/rewire/
