@@ -164,9 +164,10 @@ rewire.Func(t, bar.Map[int, string], func(in []int, f func(int) string) []string
 })
 ```
 
+Methods on generic types work too — see [Method Mocking](method-mocking.md#methods-on-generic-types).
+
 **Known limitations:**
 
-- Generic *methods* on generic types aren't supported yet — the rewriter will reject them with a clear error. Plain generic functions work.
 - rewire relies on the pre-scan seeing every instantiation your tests will use. An instantiation that only appears inside a `reflect.MakeFunc` or similar dynamic construct wouldn't be picked up, but that's a niche case.
 
 ## Restoring mocks mid-test

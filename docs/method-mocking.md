@@ -69,6 +69,48 @@ Two reasons for the restriction:
 
 If you accidentally pass a method value, rewire detects it and fails the test with a targeted error pointing to the method-expression form you should use instead.
 
+## Methods on generic types
+
+Methods on generic types (`func (c *Container[T]) Add(v T)`) are supported, and each type-argument combination is mocked independently — same API as non-generic methods:
+
+```go
+// Production: example/bar/bar.go
+type Container[T any] struct {
+    items []T
+}
+
+func (c *Container[T]) Add(v T) {
+    c.items = append(c.items, v)
+}
+```
+
+```go
+// Test
+func TestContainer_MockInt(t *testing.T) {
+    rewire.Func(t, (*bar.Container[int]).Add, func(c *bar.Container[int], v int) {
+        // mock body — doesn't delegate, so items stays empty
+    })
+
+    ci := &bar.Container[int]{}
+    ci.Add(1)
+    ci.Add(2)
+    if ci.Len() != 0 {
+        t.Errorf("int mock should have swallowed adds, got Len=%d", ci.Len())
+    }
+
+    // A different instantiation is untouched
+    cs := &bar.Container[string]{}
+    cs.Add("hello")
+    if cs.Len() != 1 {
+        t.Errorf("string instantiation should run real, got Len=%d", cs.Len())
+    }
+}
+```
+
+`rewire.Real` and `rewire.Restore` also work for generic methods. `rewire.Real(t, (*bar.Container[int]).Add)` returns a `func(*bar.Container[int], int)` that invokes the real method — pass the receiver as the first argument to call it.
+
+The only thing rewire can't rewrite is a method that declares its *own* type parameters (`func (c *C) Method[X any]()`) — Go 1.18+ forbids that anyway, so it's not a practical gap.
+
 ## Closure capture
 
 Just like function mocks, method replacements are closures:

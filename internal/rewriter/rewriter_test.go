@@ -1,6 +1,8 @@
 package rewriter
 
 import (
+	"go/parser"
+	"go/token"
 	"testing"
 )
 
@@ -618,7 +620,302 @@ func (s *S) Hello() string { return "hi" }
 	assertContains(t, err.Error(), "not found")
 }
 
+// ---------------------------------------------------------------------------
+// Generic function rewriting
+// ---------------------------------------------------------------------------
+
+func TestRewriteSource_GenericFunction_Basic(t *testing.T) {
+	src := []byte(`package bar
+
+func Map[T, U any](in []T, f func(T) U) []U {
+	out := make([]U, len(in))
+	for i, v := range in {
+		out[i] = f(v)
+	}
+	return out
+}
+`)
+	out, err := RewriteSource(src, "Map")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+	t.Log("Rewritten source:\n" + result)
+
+	assertParsesAsGo(t, result)
+	assertContains(t, result, `"sync"`)
+	assertContains(t, result, `"reflect"`)
+	assertContains(t, result, "var Mock_Map sync.Map")
+	assertContains(t, result, "func Real_Map[T, U any](in []T, f func(T) U) []U")
+	assertContains(t, result, "func Map[T, U any](in []T, f func(T) U) []U")
+	assertContains(t, result, "Mock_Map.Load(reflect.TypeOf(Map[T, U]).String())")
+	assertContains(t, result, "_rewire_raw.(func([]T, func(T) U) []U)")
+	assertContains(t, result, "func _real_Map[T, U any](in []T, f func(T) U) []U")
+}
+
+func TestRewriteSource_GenericFunction_SingleTypeParam(t *testing.T) {
+	src := []byte(`package bar
+
+func First[T any](xs []T) T {
+	return xs[0]
+}
+`)
+	out, err := RewriteSource(src, "First")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+	t.Log("Rewritten source:\n" + result)
+
+	assertParsesAsGo(t, result)
+	assertContains(t, result, "var Mock_First sync.Map")
+	assertContains(t, result, "Mock_First.Load(reflect.TypeOf(First[T]).String())")
+	assertContains(t, result, "func Real_First[T any](xs []T) T")
+}
+
+func TestRewriteSource_GenericFunction_NoResults(t *testing.T) {
+	src := []byte(`package bar
+
+func Consume[T any](x T) {
+	_ = x
+}
+`)
+	out, err := RewriteSource(src, "Consume")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+	t.Log("Rewritten source:\n" + result)
+
+	assertParsesAsGo(t, result)
+	assertContains(t, result, "var Mock_Consume sync.Map")
+	// Void wrapper form: no `return` before the mock call.
+	assertContains(t, result, "_rewire_typed(x)")
+	assertNotContains(t, result, "return _rewire_typed(x)")
+}
+
+func TestRewriteSource_GenericFunction_Variadic(t *testing.T) {
+	src := []byte(`package bar
+
+func Concat[T any](prefix T, rest ...T) []T {
+	out := []T{prefix}
+	out = append(out, rest...)
+	return out
+}
+`)
+	out, err := RewriteSource(src, "Concat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+	t.Log("Rewritten source:\n" + result)
+
+	assertParsesAsGo(t, result)
+	// Variadic spread must survive on the forwarding mock call and the real call.
+	assertContains(t, result, "_rewire_typed(prefix, rest...)")
+	assertContains(t, result, "_real_Concat(prefix, rest...)")
+}
+
+func TestRewriteSource_GenericFunction_Constraint(t *testing.T) {
+	src := []byte(`package bar
+
+func Max[T int | float64](a, b T) T {
+	if a > b {
+		return a
+	}
+	return b
+}
+`)
+	out, err := RewriteSource(src, "Max")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+	t.Log("Rewritten source:\n" + result)
+
+	assertParsesAsGo(t, result)
+	// The constraint should be preserved on the wrapper, alias, and real.
+	assertContains(t, result, "func Max[T int | float64](a, b T) T")
+	assertContains(t, result, "func Real_Max[T int | float64](a, b T) T")
+	assertContains(t, result, "func _real_Max[T int | float64](a, b T) T")
+}
+
+// ---------------------------------------------------------------------------
+// Generic method rewriting (methods on generic types)
+// ---------------------------------------------------------------------------
+
+func TestRewriteSource_GenericMethod_PointerReceiver(t *testing.T) {
+	src := []byte(`package bar
+
+type Container[T any] struct {
+	items []T
+}
+
+func (c *Container[T]) Add(v T) {
+	c.items = append(c.items, v)
+}
+`)
+	out, err := RewriteSource(src, "(*Container).Add")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+	t.Log("Rewritten source:\n" + result)
+
+	assertParsesAsGo(t, result)
+	assertContains(t, result, "type Container[T any]") // type decl preserved
+	assertContains(t, result, "var Mock_Container_Add sync.Map")
+	assertContains(t, result, "func Real_Container_Add[T any](c *Container[T], v T)")
+	assertContains(t, result, "func (c *Container[T]) Add(v T)")
+	assertContains(t, result, "Mock_Container_Add.Load(reflect.TypeOf((*Container[T]).Add).String())")
+	assertContains(t, result, "_rewire_raw.(func(*Container[T], T))")
+	assertContains(t, result, "_rewire_typed(c, v)")
+	assertContains(t, result, "func (c *Container[T]) _real_Container_Add(v T)")
+}
+
+func TestRewriteSource_GenericMethod_ValueReceiver(t *testing.T) {
+	src := []byte(`package bar
+
+type Pair[T any] struct {
+	A, B T
+}
+
+func (p Pair[T]) First() T {
+	return p.A
+}
+`)
+	out, err := RewriteSource(src, "Pair.First")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+	t.Log("Rewritten source:\n" + result)
+
+	assertParsesAsGo(t, result)
+	assertContains(t, result, "var Mock_Pair_First sync.Map")
+	assertContains(t, result, "func Real_Pair_First[T any](p Pair[T]) T")
+	assertContains(t, result, "func (p Pair[T]) First() T")
+	// Value receiver self-reference uses the method expression Pair[T].First.
+	assertContains(t, result, "Mock_Pair_First.Load(reflect.TypeOf(Pair[T].First).String())")
+	assertContains(t, result, "_rewire_raw.(func(Pair[T]) T)")
+	assertContains(t, result, "func (p Pair[T]) _real_Pair_First() T")
+}
+
+func TestRewriteSource_GenericMethod_MultipleTypeParams(t *testing.T) {
+	src := []byte(`package bar
+
+type Map2[K comparable, V any] struct {
+	data map[K]V
+}
+
+func (m *Map2[K, V]) Get(k K) (V, bool) {
+	v, ok := m.data[k]
+	return v, ok
+}
+`)
+	out, err := RewriteSource(src, "(*Map2).Get")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+	t.Log("Rewritten source:\n" + result)
+
+	assertParsesAsGo(t, result)
+	assertContains(t, result, "var Mock_Map2_Get sync.Map")
+	// Constraint `comparable` must survive on the Real_ alias.
+	assertContains(t, result, "func Real_Map2_Get[K comparable, V any](m *Map2[K, V], k K) (V, bool)")
+	assertContains(t, result, "func (m *Map2[K, V]) Get(k K) (V, bool)")
+	assertContains(t, result, "Mock_Map2_Get.Load(reflect.TypeOf((*Map2[K, V]).Get).String())")
+	assertContains(t, result, "_rewire_raw.(func(*Map2[K, V], K) (V, bool))")
+}
+
+func TestRewriteSource_GenericMethod_NoResults(t *testing.T) {
+	src := []byte(`package bar
+
+type Logger[T any] struct{}
+
+func (l *Logger[T]) Log(v T) {
+	_ = v
+}
+`)
+	out, err := RewriteSource(src, "(*Logger).Log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+	t.Log("Rewritten source:\n" + result)
+
+	assertParsesAsGo(t, result)
+	assertContains(t, result, "_rewire_typed(l, v)")
+	// No `return` on the void wrapper body.
+	assertNotContains(t, result, "return _rewire_typed(l, v)")
+}
+
+func TestRewriteSource_GenericMethod_Variadic(t *testing.T) {
+	src := []byte(`package bar
+
+type Batch[T any] struct {
+	items []T
+}
+
+func (b *Batch[T]) Push(vs ...T) {
+	b.items = append(b.items, vs...)
+}
+`)
+	out, err := RewriteSource(src, "(*Batch).Push")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+	t.Log("Rewritten source:\n" + result)
+
+	assertParsesAsGo(t, result)
+	// Variadic spread preserved in both the mock forward and the real call.
+	assertContains(t, result, "_rewire_typed(b, vs...)")
+	assertContains(t, result, "b._real_Batch_Push(vs...)")
+}
+
+func TestRewriteSource_GenericMethod_DistinctFromNonGenericSameName(t *testing.T) {
+	// Two types in the same file — one generic, one not — both with an
+	// Add method. Rewrite only the generic one and verify the other is
+	// left alone.
+	src := []byte(`package bar
+
+type Container[T any] struct{ items []T }
+
+func (c *Container[T]) Add(v T) {
+	c.items = append(c.items, v)
+}
+
+type PlainBag struct{ items []int }
+
+func (p *PlainBag) Add(v int) {
+	p.items = append(p.items, v)
+}
+`)
+	out, err := RewriteSource(src, "(*Container).Add")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+	t.Log("Rewritten source:\n" + result)
+
+	assertParsesAsGo(t, result)
+	assertContains(t, result, "var Mock_Container_Add sync.Map")
+	// PlainBag.Add must be untouched.
+	assertNotContains(t, result, "Mock_PlainBag_Add")
+	assertContains(t, result, "func (p *PlainBag) Add(v int)")
+}
+
 // --- Helpers ---
+
+func assertParsesAsGo(t *testing.T, src string) {
+	t.Helper()
+	fset := token.NewFileSet()
+	if _, err := parser.ParseFile(fset, "", src, parser.ParseComments); err != nil {
+		t.Fatalf("rewritten source is not valid Go: %v\n---\n%s", err, src)
+	}
+}
 
 func assertContains(t *testing.T, s, substr string) {
 	t.Helper()

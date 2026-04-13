@@ -489,18 +489,22 @@ func resolveStdExportPaths(pkgs []string) (map[string]string, error) {
 	return result, nil
 }
 
-// isGenericFunc reports whether the named target function in importPath
-// is defined with type parameters. It resolves the package directory via
-// go/build and AST-parses the package's non-test Go files looking for a
-// matching top-level function declaration.
+// isGenericFunc reports whether the named target in importPath is a
+// plain generic function OR a method on a generic type. It resolves the
+// package directory via go/build and AST-parses the package's non-test
+// Go files.
 //
-// Only plain function names are checked — method targets like
-// "(*Type).Method" or "Type.Method" return false, since generic methods
-// aren't supported. Any parsing failure is treated as "not generic",
-// since a false negative just causes codegen to emit a RegisterReal call
-// that will then fail to compile, surfacing the issue clearly.
+// For "Func", the function's own TypeParams must be non-empty.
+// For "(*Type).Method" or "Type.Method", the receiver type's TypeSpec
+// must have TypeParams. (Go 1.18+ forbids method-level type params, so
+// all the parameters come from the type declaration.)
+//
+// Any parsing failure is treated as "not generic" — a false negative
+// just causes codegen to emit a RegisterReal call that fails to compile
+// with a clear error, so the user sees something fix-able.
 func isGenericFunc(importPath, funcName string) bool {
-	if strings.ContainsAny(funcName, ".(*)") {
+	typeName, _, isMethod := parseTargetName(funcName)
+	if isMethod && typeName == "" {
 		return false
 	}
 	pkg, err := build.Default.Import(importPath, ".", build.FindOnly)
@@ -522,6 +526,22 @@ func isGenericFunc(importPath, funcName string) bool {
 			continue
 		}
 		for _, decl := range file.Decls {
+			if isMethod {
+				// Looking for a type spec with matching name and type params.
+				gen, ok := decl.(*ast.GenDecl)
+				if !ok || gen.Tok != token.TYPE {
+					continue
+				}
+				for _, spec := range gen.Specs {
+					ts, ok := spec.(*ast.TypeSpec)
+					if !ok || ts.Name.Name != typeName {
+						continue
+					}
+					return ts.TypeParams != nil && ts.TypeParams.NumFields() > 0
+				}
+				continue
+			}
+			// Plain function lookup.
 			fd, ok := decl.(*ast.FuncDecl)
 			if !ok || fd.Recv != nil || fd.Name.Name != funcName {
 				continue
@@ -530,6 +550,27 @@ func isGenericFunc(importPath, funcName string) bool {
 		}
 	}
 	return false
+}
+
+// parseTargetName decomposes a rewire target name into its shape:
+//
+//	"Func"              → ("",         "Func",   false)
+//	"Type.Method"       → ("Type",     "Method", true)
+//	"(*Type).Method"    → ("Type",     "Method", true)
+//
+// Mirrors the logic the rewriter uses so the codegen can reason about
+// target kinds without touching the rewriter package.
+func parseTargetName(name string) (typeName, methodName string, isMethod bool) {
+	if strings.HasPrefix(name, "(*") {
+		if idx := strings.Index(name, ")."); idx > 2 {
+			return name[2:idx], name[idx+2:], true
+		}
+		return "", "", false
+	}
+	if idx := strings.LastIndex(name, "."); idx > 0 {
+		return name[:idx], name[idx+1:], true
+	}
+	return "", name, false
 }
 
 // mockVarName converts a target name to the corresponding Mock_ variable name.

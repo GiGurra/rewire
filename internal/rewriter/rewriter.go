@@ -73,14 +73,22 @@ func RewriteSource(src []byte, funcName string) ([]byte, error) {
 		return nil, fmt.Errorf("function %q not found", funcName)
 	}
 
-	// Generic functions take a separate code path that emits a sync.Map-
-	// based per-instantiation dispatch table. Generic methods on generic
-	// types are not supported in v1.
+	// Function-level type parameters (only legal on plain functions in
+	// Go 1.18+ — methods can't declare their own type params).
 	if target.Type.TypeParams != nil && target.Type.TypeParams.NumFields() > 0 {
 		if isMethod {
-			return nil, fmt.Errorf("generic methods are not yet supported (function %q)", funcName)
+			return nil, fmt.Errorf("method-level type parameters are not supported — put them on the receiver type (function %q)", funcName)
 		}
 		return rewriteGenericFunction(fset, file, target, targetIdx, funcName)
+	}
+
+	// Methods on generic types: the method itself has no TypeParams, but
+	// its receiver refers to a type whose declaration is generic. Look up
+	// the receiver type spec in the file and branch if found.
+	if isMethod {
+		if typeTypeParams := findTypeDeclTypeParams(file, typeName); typeTypeParams != nil {
+			return rewriteGenericMethod(fset, file, target, targetIdx, typeName, methodName, isPointer, typeTypeParams)
+		}
 	}
 
 	// Extract signature info
@@ -373,15 +381,14 @@ func %s%s(%s) %s {
 	clearNodePositions(newRealAlias)
 	clearNodePositions(newWrapper)
 
-	// Merge reflect + sync into the target file's import block.
-	ensureImport(file, "reflect")
-	ensureImport(file, "sync")
-
 	// Rename the original function to _real_<Name> so it remains a
 	// generic function with the same body.
 	target.Name.Name = realFuncName
 
-	// Replace target in-place: Mock var + Real alias + wrapper + renamed original.
+	// Replace target in-place: Mock var + Real alias + wrapper + renamed
+	// original. This must happen BEFORE ensureImport — if ensureImport
+	// prepends a new import decl, targetIdx becomes stale and the splice
+	// would skip the type decl and duplicate target.
 	newDecls := make([]ast.Decl, 0, len(file.Decls)+3)
 	newDecls = append(newDecls, file.Decls[:targetIdx]...)
 	newDecls = append(newDecls, newMock)
@@ -390,6 +397,209 @@ func %s%s(%s) %s {
 	newDecls = append(newDecls, target)
 	newDecls = append(newDecls, file.Decls[targetIdx+1:]...)
 	file.Decls = newDecls
+
+	// Now that the splice is done and targetIdx is no longer needed,
+	// merge reflect + sync into the target file's import block.
+	ensureImport(file, "reflect")
+	ensureImport(file, "sync")
+
+	var buf bytes.Buffer
+	if err := format.Node(&buf, fset, file); err != nil {
+		return nil, fmt.Errorf("formatting output: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+// findTypeDeclTypeParams searches file for a top-level type declaration
+// named typeName and returns its type parameter list, or nil if the type
+// is not declared in the file or has no type parameters.
+func findTypeDeclTypeParams(file *ast.File, typeName string) *ast.FieldList {
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.TYPE {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			ts, ok := spec.(*ast.TypeSpec)
+			if !ok || ts.Name.Name != typeName {
+				continue
+			}
+			if ts.TypeParams != nil && ts.TypeParams.NumFields() > 0 {
+				return ts.TypeParams
+			}
+			return nil
+		}
+	}
+	return nil
+}
+
+// rewriteGenericMethod handles methods on generic types like
+//
+//	func (c *Container[T]) Add(v T)
+//
+// It emits a sync.Map-backed mock variable (one per method, not per
+// instantiation), a wrapper method that dispatches via
+// reflect.TypeOf((*Container[T]).Add).String(), and a free generic
+// function Real_Container_Add[T any](c *Container[T], v T) so the
+// codegen can materialize concrete Real_X[T1, T2, ...] values at
+// compile time for each instantiation.
+//
+// The method itself can't declare type parameters (Go 1.18+ forbids it),
+// so all type params come from the receiver's type declaration, passed
+// in as typeTypeParams.
+func rewriteGenericMethod(fset *token.FileSet, file *ast.File, target *ast.FuncDecl, targetIdx int, typeName, methodName string, isPointer bool, typeTypeParams *ast.FieldList) ([]byte, error) {
+	params := ensureParamNames(target.Type.Params)
+	hasResults := target.Type.Results != nil && len(target.Type.Results.List) > 0
+	isVariadic := isVariadicFunc(target.Type)
+
+	mockVarName := fmt.Sprintf("Mock_%s_%s", typeName, methodName)
+	realFuncName := fmt.Sprintf("_real_%s_%s", typeName, methodName)
+	realAliasName := fmt.Sprintf("Real_%s_%s", typeName, methodName)
+	wrapperName := methodName
+
+	// Type-parameter list from the receiver type: "[T any]" / "[K, V any]".
+	typeParamsInnerSrc, err := fieldListToString(fset, typeTypeParams)
+	if err != nil {
+		return nil, fmt.Errorf("printing type params: %w", err)
+	}
+	typeParamsDecl := "[" + typeParamsInnerSrc + "]"
+
+	var typeParamNames []string
+	for _, field := range typeTypeParams.List {
+		for _, n := range field.Names {
+			typeParamNames = append(typeParamNames, n.Name)
+		}
+	}
+	typeParamRef := "[" + strings.Join(typeParamNames, ", ") + "]"
+
+	// Receiver expressions:
+	//   recvTypeWithParams: "*Container[T]"   or  "Container[T]"
+	//   methodExprStr:       "(*Container[T]).Add" or "Container[T].Add"
+	var recvTypeWithParams, methodExprStr string
+	if isPointer {
+		recvTypeWithParams = "*" + typeName + typeParamRef
+		methodExprStr = "(*" + typeName + typeParamRef + ")." + methodName
+	} else {
+		recvTypeWithParams = typeName + typeParamRef
+		methodExprStr = typeName + typeParamRef + "." + methodName
+	}
+
+	paramsSrc, err := fieldListToString(fset, params)
+	if err != nil {
+		return nil, fmt.Errorf("printing params: %w", err)
+	}
+	resultsSrc := ""
+	if hasResults {
+		resultsSrc, err = resultsToString(fset, target.Type.Results)
+		if err != nil {
+			return nil, fmt.Errorf("printing results: %w", err)
+		}
+	}
+
+	callArgs := buildCallArgs(params, isVariadic)
+
+	// Receiver name (use the original if one was given, else a synthetic).
+	recvField := target.Recv.List[0]
+	recvName := "_rewire_recv"
+	if len(recvField.Names) > 0 && recvField.Names[0].Name != "" {
+		recvName = recvField.Names[0].Name
+	}
+	recvDeclSrc := fmt.Sprintf("(%s %s)", recvName, recvTypeWithParams)
+
+	// Type of the mock function the wrapper expects: receiver prepended
+	// to the method's params. Example: func(*Container[T], T)
+	mockParamsStr := recvTypeWithParams
+	if pOnly := typeOnlyFieldList(fset, params); pOnly != "" {
+		mockParamsStr += ", " + pOnly
+	}
+	mockFnType := "func(" + mockParamsStr + ")"
+	if hasResults {
+		mockFnType = "func(" + mockParamsStr + ") " + resultsSrc
+	}
+
+	// When calling the mock, we pass the receiver first, then the params.
+	mockCallArgs := recvName
+	if callArgs != "" {
+		mockCallArgs += ", " + callArgs
+	}
+
+	var wrapperBody, realAliasBody string
+	if hasResults {
+		wrapperBody = fmt.Sprintf(`if _rewire_raw, _rewire_ok := %s.Load(reflect.TypeOf(%s).String()); _rewire_ok {
+		if _rewire_typed, _rewire_ok := _rewire_raw.(%s); _rewire_ok {
+			return _rewire_typed(%s)
+		}
+	}
+	return %s.%s(%s)`, mockVarName, methodExprStr, mockFnType, mockCallArgs, recvName, realFuncName, callArgs)
+		realAliasBody = fmt.Sprintf("return %s.%s(%s)", recvName, realFuncName, callArgs)
+	} else {
+		wrapperBody = fmt.Sprintf(`if _rewire_raw, _rewire_ok := %s.Load(reflect.TypeOf(%s).String()); _rewire_ok {
+		if _rewire_typed, _rewire_ok := _rewire_raw.(%s); _rewire_ok {
+			_rewire_typed(%s)
+			return
+		}
+	}
+	%s.%s(%s)`, mockVarName, methodExprStr, mockFnType, mockCallArgs, recvName, realFuncName, callArgs)
+		realAliasBody = fmt.Sprintf("%s.%s(%s)", recvName, realFuncName, callArgs)
+	}
+
+	// The Real_ alias is a free generic FUNCTION — takes the receiver as
+	// first arg, carries the type-parameter list with its original
+	// constraints, and forwards to the renamed method.
+	realAliasParams := fmt.Sprintf("%s %s", recvName, recvTypeWithParams)
+	if paramsSrc != "" {
+		realAliasParams += ", " + paramsSrc
+	}
+
+	genSrc := fmt.Sprintf(`package %s
+
+var %s sync.Map
+
+func %s%s(%s) %s {
+	%s
+}
+
+func %s %s(%s) %s {
+	%s
+}
+`, file.Name.Name,
+		mockVarName,
+		realAliasName, typeParamsDecl, realAliasParams, resultsSrc, realAliasBody,
+		recvDeclSrc, wrapperName, paramsSrc, resultsSrc, wrapperBody,
+	)
+
+	genFset := token.NewFileSet()
+	genFile, err := parser.ParseFile(genFset, "", genSrc, parser.ParseComments)
+	if err != nil {
+		return nil, fmt.Errorf("parsing generated generic-method wrapper (this is a bug in rewire):\n%s\nerror: %w", genSrc, err)
+	}
+	if len(genFile.Decls) != 3 {
+		return nil, fmt.Errorf("internal error: expected 3 generated decls for generic method, got %d", len(genFile.Decls))
+	}
+	newMock := genFile.Decls[0]       // var Mock_X sync.Map
+	newRealAlias := genFile.Decls[1]  // func Real_X[...]
+	newWrapper := genFile.Decls[2]    // func (recv *Type[T]) X(...)
+	clearNodePositions(newMock)
+	clearNodePositions(newRealAlias)
+	clearNodePositions(newWrapper)
+
+	// Rename the original method to _real_Type_Method. It stays a method
+	// with the original receiver (still `func (c *Container[T]) _real_X(...)`).
+	target.Name.Name = realFuncName
+
+	// Splice BEFORE ensureImport — see the comment in rewriteGenericFunction
+	// for why (stale targetIdx if ensureImport prepends an import decl).
+	newDecls := make([]ast.Decl, 0, len(file.Decls)+3)
+	newDecls = append(newDecls, file.Decls[:targetIdx]...)
+	newDecls = append(newDecls, newMock)
+	newDecls = append(newDecls, newRealAlias)
+	newDecls = append(newDecls, newWrapper)
+	newDecls = append(newDecls, target)
+	newDecls = append(newDecls, file.Decls[targetIdx+1:]...)
+	file.Decls = newDecls
+
+	ensureImport(file, "reflect")
+	ensureImport(file, "sync")
 
 	var buf bytes.Buffer
 	if err := format.Node(&buf, fset, file); err != nil {
@@ -725,7 +935,10 @@ func parseMethodTarget(funcName string) (typeName, methodName string, isPointer,
 	return "", funcName, false, false
 }
 
-// matchesReceiver checks if a receiver field list matches the expected type and pointer-ness.
+// matchesReceiver checks if a receiver field list matches the expected type
+// and pointer-ness. Accepts both plain types (`*Container`) and generic
+// types (`*Container[T]` / `*Container[K, V]`) — the type argument list
+// is stripped before matching the type name.
 func matchesReceiver(recv *ast.FieldList, typeName string, isPointer bool) bool {
 	if recv == nil || len(recv.List) == 0 {
 		return false
@@ -736,8 +949,14 @@ func matchesReceiver(recv *ast.FieldList, typeName string, isPointer bool) bool 
 		if !ok {
 			return false
 		}
-		ident, ok := starExpr.X.(*ast.Ident)
-		return ok && ident.Name == typeName
+		recvType = starExpr.X
+	}
+	// Strip generic type arguments: `Container[T]` → `Container`.
+	switch idx := recvType.(type) {
+	case *ast.IndexExpr:
+		recvType = idx.X
+	case *ast.IndexListExpr:
+		recvType = idx.X
 	}
 	ident, ok := recvType.(*ast.Ident)
 	return ok && ident.Name == typeName

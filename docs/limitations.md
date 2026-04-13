@@ -14,9 +14,9 @@ When you mock a method like `(*Server).Handle`, the mock applies to **all instan
 
 For per-instance behavior, use [interface mocks](interface-mocks.md) instead.
 
-## Generic methods
+## Method-level type parameters
 
-Generic *functions* are supported — see [Function Mocking](function-mocking.md#generic-functions). However, methods on generic types (e.g. `func (c *Container[T]) Add(v T)`) are not yet supported. The rewriter will reject them with a clear error.
+Go 1.18+ does not allow methods to declare their own type parameters — any type parameters on a method come from its receiver type. Rewire follows the same rule: methods on generic types like `func (c *Container[T]) Add(v T)` are supported (see [Method Mocking](method-mocking.md#methods-on-generic-types)), but a hypothetical `func (c *C) Method[X any]()` would be rejected.
 
 ## No parallel mock safety
 

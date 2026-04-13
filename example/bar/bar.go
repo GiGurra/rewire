@@ -31,3 +31,22 @@ func Map[T, U any](in []T, f func(T) U) []U {
 	}
 	return out
 }
+
+// Container is a generic type used to verify rewire's mocking of methods
+// on generic types. Mocking (*Container[int]).Add must only replace the
+// int instantiation — other instantiations still run the real body.
+type Container[T any] struct {
+	items []T
+}
+
+func (c *Container[T]) Add(v T) {
+	c.items = append(c.items, v)
+}
+
+func (c *Container[T]) Get(i int) T {
+	return c.items[i]
+}
+
+func (c *Container[T]) Len() int {
+	return len(c.items)
+}

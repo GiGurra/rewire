@@ -198,14 +198,14 @@ func scanFileForMockCalls(path string) (mockTargets, genericInstantiations) {
 			return true
 		}
 
-		importPath, targetName := extractMockTarget(call.Args[1], imports)
+		importPath, targetName, typeArgs := extractMockTarget(call.Args[1], imports, fset)
 		if importPath == "" {
 			return true
 		}
 
 		targets[importPath] = append(targets[importPath], targetName)
 
-		if typeArgs := extractTypeArgs(call.Args[1], fset); len(typeArgs) > 0 {
+		if len(typeArgs) > 0 {
 			if insts[importPath] == nil {
 				insts[importPath] = map[string][][]string{}
 			}
@@ -217,88 +217,109 @@ func scanFileForMockCalls(path string) (mockTargets, genericInstantiations) {
 	return targets, insts
 }
 
-// extractTypeArgs returns the type-argument expressions of a generic
-// reference like pkg.Map[int, string], as Go source strings. Returns
-// nil for non-generic references.
-func extractTypeArgs(expr ast.Expr, fset *token.FileSet) []string {
-	switch idx := expr.(type) {
-	case *ast.IndexExpr:
-		return []string{exprSource(idx.Index, fset)}
-	case *ast.IndexListExpr:
-		out := make([]string, 0, len(idx.Indices))
-		for _, ix := range idx.Indices {
-			out = append(out, exprSource(ix, fset))
-		}
-		return out
-	}
-	return nil
-}
-
 func exprSource(expr ast.Expr, fset *token.FileSet) string {
 	var buf strings.Builder
 	_ = printer.Fprint(&buf, fset, expr)
 	return buf.String()
 }
 
-// extractMockTarget extracts the import path and target name from the second
-// argument of a rewire.Func call. Handles:
-//   - pkg.Func                  → (importPath, "Func")
-//   - pkg.Func[T]               → (importPath, "Func")      (generic, 1 type arg)
-//   - pkg.Func[T, U]            → (importPath, "Func")      (generic, 2+ type args)
-//   - pkg.Type.Method           → (importPath, "Type.Method")
-//   - (*pkg.Type).Method        → (importPath, "(*Type).Method")
-//
-// For generic references, the type arguments are discarded here — the
-// scanner only needs to know which function to rewrite, not which
-// instantiations exist. Per-instantiation dispatch happens at runtime
-// via reflect.TypeOf keying.
-func extractMockTarget(expr ast.Expr, imports map[string]string) (importPath, targetName string) {
-	// Strip an optional [T] or [T, U, ...] type-argument list.
-	if idx, ok := expr.(*ast.IndexExpr); ok {
-		expr = idx.X
-	} else if idx, ok := expr.(*ast.IndexListExpr); ok {
-		expr = idx.X
+// stripTypeArgs peels an IndexExpr or IndexListExpr off an expression,
+// returning the inner expression and any type arguments found. For a
+// non-generic expression it returns (expr, nil).
+func stripTypeArgs(expr ast.Expr, fset *token.FileSet) (ast.Expr, []string) {
+	switch idx := expr.(type) {
+	case *ast.IndexExpr:
+		return idx.X, []string{exprSource(idx.Index, fset)}
+	case *ast.IndexListExpr:
+		out := make([]string, 0, len(idx.Indices))
+		for _, ix := range idx.Indices {
+			out = append(out, exprSource(ix, fset))
+		}
+		return idx.X, out
 	}
+	return expr, nil
+}
+
+// extractMockTarget parses the second argument of a rewire.Func /
+// rewire.Real / rewire.Restore call into an import path, a canonical
+// target name, and (for generic references) the list of type-argument
+// source strings. Returns an empty importPath when the expression
+// doesn't match any recognized form.
+//
+// Handles:
+//
+//	pkg.Func                       → ("pkg", "Func",             nil)
+//	pkg.Func[T]                    → ("pkg", "Func",             [T])
+//	pkg.Func[T, U]                 → ("pkg", "Func",             [T U])
+//	pkg.Type.Method                → ("pkg", "Type.Method",      nil)
+//	pkg.Type[T].Method             → ("pkg", "Type.Method",      [T])
+//	(*pkg.Type).Method             → ("pkg", "(*Type).Method",   nil)
+//	(*pkg.Type[T]).Method          → ("pkg", "(*Type).Method",   [T])
+//	(*pkg.Type[T, U]).Method       → ("pkg", "(*Type).Method",   [T U])
+//
+// The canonical target name never includes the type arguments, because
+// per-instantiation dispatch happens at runtime via reflect.TypeOf
+// keying. The type arguments are captured separately so the toolexec
+// codegen can materialize concrete Real_X[T1, T2] values at compile time.
+func extractMockTarget(expr ast.Expr, imports map[string]string, fset *token.FileSet) (importPath, targetName string, typeArgs []string) {
+	// Strip outermost [T] / [T, U] — this covers the function-reference
+	// forms like pkg.Func[int, string].
+	expr, typeArgs = stripTypeArgs(expr, fset)
 
 	sel, ok := expr.(*ast.SelectorExpr)
 	if !ok {
-		return "", ""
+		return "", "", nil
 	}
 	methodName := sel.Sel.Name
 
-	// Case 1: pkg.Func
+	// Case 1: pkg.Func (possibly generic — but that was stripped above)
 	if pkgIdent, ok := sel.X.(*ast.Ident); ok {
 		if ip, ok := imports[pkgIdent.Name]; ok {
-			return ip, methodName
+			return ip, methodName, typeArgs
 		}
-		return "", ""
+		return "", "", nil
 	}
 
-	// Case 2: pkg.Type.Method (value receiver)
-	if innerSel, ok := sel.X.(*ast.SelectorExpr); ok {
-		if pkgIdent, ok := innerSel.X.(*ast.Ident); ok {
-			if ip, ok := imports[pkgIdent.Name]; ok {
-				return ip, innerSel.Sel.Name + "." + methodName
+	// Case 2: pkg.Type.Method or pkg.Type[T].Method (value receiver).
+	// The X is either a SelectorExpr (pkg.Type) or an IndexExpr/
+	// IndexListExpr wrapping a SelectorExpr (pkg.Type[T]).
+	if innerX, innerArgs := stripTypeArgs(sel.X, fset); innerArgs != nil || isValueReceiverSelector(innerX) {
+		if innerSel, ok := innerX.(*ast.SelectorExpr); ok {
+			if pkgIdent, ok := innerSel.X.(*ast.Ident); ok {
+				if ip, ok := imports[pkgIdent.Name]; ok {
+					// Type-args belong to the inner receiver, not the outer selector.
+					return ip, innerSel.Sel.Name + "." + methodName, innerArgs
+				}
 			}
+			return "", "", nil
 		}
-		return "", ""
 	}
 
-	// Case 3: (*pkg.Type).Method (pointer receiver)
+	// Case 3: (*pkg.Type).Method or (*pkg.Type[T]).Method (pointer receiver)
 	if parenExpr, ok := sel.X.(*ast.ParenExpr); ok {
 		if starExpr, ok := parenExpr.X.(*ast.StarExpr); ok {
-			if innerSel, ok := starExpr.X.(*ast.SelectorExpr); ok {
+			// The inner type may be wrapped in IndexExpr / IndexListExpr.
+			inner, innerArgs := stripTypeArgs(starExpr.X, fset)
+			if innerSel, ok := inner.(*ast.SelectorExpr); ok {
 				if pkgIdent, ok := innerSel.X.(*ast.Ident); ok {
 					if ip, ok := imports[pkgIdent.Name]; ok {
-						return ip, "(*" + innerSel.Sel.Name + ")." + methodName
+						return ip, "(*" + innerSel.Sel.Name + ")." + methodName, innerArgs
 					}
 				}
 			}
 		}
-		return "", ""
+		return "", "", nil
 	}
 
-	return "", ""
+	return "", "", nil
+}
+
+// isValueReceiverSelector returns true iff expr is a SelectorExpr — used
+// by extractMockTarget to distinguish pkg.Type.Method from forms that
+// can't be a value receiver.
+func isValueReceiverSelector(expr ast.Expr) bool {
+	_, ok := expr.(*ast.SelectorExpr)
+	return ok
 }
 
 func dedupe(ss []string) []string {

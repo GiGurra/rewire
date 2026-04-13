@@ -292,12 +292,13 @@ func methodValueError(name string) string {
 // (see validateFuncArgument). Callers outside resolveMockVar must validate
 // first, or FuncForPC may return nil and this will panic.
 //
-// For generic instantiations, FuncForPC returns a name with a trailing
-// "[...]" placeholder (e.g. "pkg.Map[...]" for every instantiation of
-// Map, regardless of the actual type arguments). We strip it so that
-// registry lookups can use the same key as the codegen-emitted
-// registration calls, which only know the base function name.
+// For generic instantiations, FuncForPC inserts a literal "[...]"
+// placeholder wherever a type argument list would live — as a suffix
+// for plain generic functions ("pkg.Map[...]") and inside the receiver
+// for generic methods ("pkg.(*Container[...]).Add"). We strip every
+// occurrence so that registry lookups match the canonical name the
+// codegen emits, which never contains type arguments.
 func funcName[F any](f F) string {
 	name := runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name()
-	return strings.TrimSuffix(name, "[...]")
+	return strings.ReplaceAll(name, "[...]", "")
 }
