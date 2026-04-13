@@ -53,7 +53,7 @@ Notice what's happening: `filepath.Abs` lives in `path/filepath`, it calls `os.G
 
 This project is 100% vibe coded — AST rewriting and compiler toolchains are way outside my comfort zone. Built entirely with [Claude Code](https://claude.ai).
 
-Inspired by Erlang's [meck](https://github.com/eproxus/meck), although the mechanism is entirely different.
+Inspired by Erlang's [meck](https://github.com/eproxus/meck), although the underlying mechanism is entirely different.
 
 ## Next steps
 
