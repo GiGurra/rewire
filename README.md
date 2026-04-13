@@ -28,7 +28,7 @@ e.On("Alice").Returns("hi Alice").Times(1)
 e.OnAny().Returns("hi other")
 ```
 
-**rewire intercepts the Go compiler via `-toolexec` and rewrites or synthesizes code in-memory during compilation.** Your source on disk is never modified. No `unsafe`, no platform-specific code, no inline-breaking tricks. Your IDE sees valid syntax.
+**rewire intercepts the Go compiler via `-toolexec` and rewrites or synthesizes temporary code during compilation.** Your source on disk is never modified. No `unsafe`, no platform-specific code, no inline-breaking tricks. Your IDE sees valid syntax.
 
 ## Quick start
 
