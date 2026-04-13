@@ -3,6 +3,7 @@ package foo
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GiGurra/rewire/pkg/rewire"
@@ -77,5 +78,74 @@ func TestRestore_WithoutPriorFunc(t *testing.T) {
 	}
 	if got == "/mocked/foo" {
 		t.Errorf("expected real path, got %q", got)
+	}
+}
+
+// Spy pattern: capture the real os.Getwd, then install a mock that
+// delegates to it and appends a suffix. This verifies that rewire.Real
+// returns a callable reference to the pre-rewrite implementation.
+func TestReal_SpyDelegatesToRealImplementation(t *testing.T) {
+	realGetwd := rewire.Real(t, os.Getwd)
+
+	rewire.Func(t, os.Getwd, func() (string, error) {
+		realPath, err := realGetwd()
+		if err != nil {
+			return "", err
+		}
+		return realPath + "/wrapped", nil
+	})
+
+	got, err := filepath.Abs("foo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(got, "/wrapped/foo") {
+		t.Errorf("expected path ending in /wrapped/foo, got %q", got)
+	}
+	if strings.Contains(got, "/mocked") {
+		t.Errorf("path should not contain /mocked, got %q", got)
+	}
+}
+
+// The real implementation should still work even when Real is captured
+// inside the mock closure (not just outside it).
+func TestReal_CallableFromInsideMockClosure(t *testing.T) {
+	rewire.Func(t, os.Getwd, func() (string, error) {
+		real := rewire.Real(t, os.Getwd)
+		path, err := real()
+		if err != nil {
+			return "", err
+		}
+		return path + "/inner", nil
+	})
+
+	got, err := filepath.Abs("foo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(got, "/inner/foo") {
+		t.Errorf("expected path ending in /inner/foo, got %q", got)
+	}
+}
+
+// Call counting: verify that the spy delegates N times to the real
+// implementation, one per call through filepath.Abs.
+func TestReal_SpyCountsRealCalls(t *testing.T) {
+	realGetwd := rewire.Real(t, os.Getwd)
+
+	realCalls := 0
+	rewire.Func(t, os.Getwd, func() (string, error) {
+		realCalls++
+		return realGetwd()
+	})
+
+	for range 5 {
+		if _, err := filepath.Abs("foo"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if realCalls != 5 {
+		t.Errorf("expected 5 delegated calls to real os.Getwd, got %d", realCalls)
 	}
 }

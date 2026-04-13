@@ -92,3 +92,41 @@ func TestWelcome_RealImplementation(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+// Spy pattern around a free function: wrap bar.Greet so every greeting
+// is shouted (uppercased) while still delegating to the real greeting logic.
+func TestReal_SpyWrapsBarGreet(t *testing.T) {
+	realGreet := rewire.Real(t, bar.Greet)
+
+	rewire.Func(t, bar.Greet, func(name string) string {
+		return realGreet(name) + " [wrapped]"
+	})
+
+	got := Welcome("Alice")
+	want := "Welcome! Hello, Alice! [wrapped]"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// Spy pattern around a method: delegate to the real (*Greeter).Greet
+// while adding audit behavior.
+func TestReal_SpyWrapsGreeterMethod(t *testing.T) {
+	realMethod := rewire.Real(t, (*bar.Greeter).Greet)
+
+	var seen []string
+	rewire.Func(t, (*bar.Greeter).Greet, func(g *bar.Greeter, name string) string {
+		seen = append(seen, name)
+		return realMethod(g, name)
+	})
+
+	g := &bar.Greeter{Prefix: "Hi"}
+	got := GreetWith(g, "Alice")
+	want := "Hi, Alice!"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if len(seen) != 1 || seen[0] != "Alice" {
+		t.Errorf("expected audit log [Alice], got %v", seen)
+	}
+}

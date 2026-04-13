@@ -10,12 +10,22 @@ import (
 	"testing"
 )
 
-var registry sync.Map // func name (string) → mock var pointer (any)
+var (
+	registry     sync.Map // func name (string) → mock var pointer (any)
+	realRegistry sync.Map // func name (string) → real function value (any)
+)
 
 // Register maps a fully-qualified function name to a pointer to its mock variable.
 // This is called by generated init() code — users should not call it directly.
 func Register(funcName string, mockVarPtr any) {
 	registry.Store(funcName, mockVarPtr)
+}
+
+// RegisterReal maps a fully-qualified function name to its pre-rewrite
+// implementation. Called by generated init() code — users should not call
+// it directly. Used by Real to return the real function for spy-style tests.
+func RegisterReal(funcName string, realFn any) {
+	realRegistry.Store(funcName, realFn)
 }
 
 // Func replaces the implementation of original with replacement for the duration
@@ -45,6 +55,63 @@ func Func[F any](t *testing.T, original F, replacement F) {
 	})
 }
 
+// Real returns the pre-rewrite implementation of original — useful for
+// spy-style tests that want to delegate to the real function from inside
+// a mock closure.
+//
+// Typical usage: capture the real implementation before installing the
+// mock, then call it from within the replacement:
+//
+//	realGetwd := rewire.Real(t, os.Getwd)
+//	rewire.Func(t, os.Getwd, func() (string, error) {
+//	    path, err := realGetwd()
+//	    if err != nil {
+//	        return "", err
+//	    }
+//	    return path + "/wrapped", nil
+//	})
+//
+// Real requires the function to be targeted by a rewire.Func call
+// somewhere in the module, so that the compiler wrapper (and thus the
+// real alias) is actually emitted.
+func Real[F any](t *testing.T, original F) F {
+	t.Helper()
+
+	if msg := validateFuncArgument(original); msg != "" {
+		t.Fatal(msg)
+		var zero F
+		return zero
+	}
+
+	name := funcName(original)
+
+	if msg := methodValueError(name); msg != "" {
+		t.Fatal(msg)
+		var zero F
+		return zero
+	}
+
+	realFn, ok := realRegistry.Load(name)
+	if !ok {
+		t.Fatalf("rewire: no real implementation registered for %s.\n"+
+			"  rewire.Real requires the function to be targeted by a rewire.Func call\n"+
+			"  somewhere in the test module so the compiler wrapper is emitted.\n"+
+			"  If nothing else mocks it, you can simply call the function directly.",
+			name)
+		var zero F
+		return zero
+	}
+
+	typed, ok := realFn.(F)
+	if !ok {
+		t.Fatalf("rewire: internal error: registered real implementation for %s has type %T, expected %T",
+			name, realFn, *new(F))
+		var zero F
+		return zero
+	}
+	return typed
+}
+
 // Restore clears any active mock for original, so subsequent calls in the
 // same test use the real implementation. Restore is optional — the test's
 // automatic cleanup already restores mocks at test end — but it lets you
@@ -64,6 +131,11 @@ func Restore[F any](t *testing.T, original F) {
 // diagnostic if the function cannot be mocked.
 func resolveMockVar[F any](t *testing.T, original F) reflect.Value {
 	t.Helper()
+
+	if msg := validateFuncArgument(original); msg != "" {
+		t.Fatal(msg)
+		return reflect.Value{}
+	}
 
 	name := funcName(original)
 
@@ -110,6 +182,30 @@ func Replace[F any](t *testing.T, target *F, replacement F) {
 	t.Cleanup(func() { *target = old })
 }
 
+// validateFuncArgument checks that f is a usable function value and returns
+// a diagnostic message if not, or "" if the argument is valid. It is
+// intentionally decoupled from *testing.T so it can be unit-tested directly.
+func validateFuncArgument[F any](f F) string {
+	v := reflect.ValueOf(f)
+	if !v.IsValid() {
+		return "rewire: function argument is invalid (untyped nil).\n" +
+			"  Pass a function reference such as bar.Greet or os.Getwd."
+	}
+	if v.Kind() != reflect.Func {
+		return fmt.Sprintf(
+			"rewire: expected a function, got value of type %s (kind %s).\n"+
+				"  rewire.Func / rewire.Restore take a function reference like bar.Greet\n"+
+				"  or os.Getwd — not a variable, literal, struct, or field.",
+			v.Type(), v.Kind(),
+		)
+	}
+	if v.IsNil() {
+		return "rewire: function argument is nil.\n" +
+			"  Pass a real function reference like bar.Greet, not a nil function variable."
+	}
+	return ""
+}
+
 // methodValueError returns a targeted error message if name looks like a
 // method value (has a "-fm" suffix produced by runtime.FuncForPC), or ""
 // otherwise. Method values are unsupported because method mocks are global:
@@ -134,15 +230,9 @@ func methodValueError(name string) string {
 	)
 }
 
+// funcName assumes f has already been validated as a non-nil function value
+// (see validateFuncArgument). Callers outside resolveMockVar must validate
+// first, or FuncForPC may return nil and this will panic.
 func funcName[F any](f F) string {
-	v := reflect.ValueOf(f)
-	if v.Kind() != reflect.Func {
-		panic("rewire: argument must be a function")
-	}
-	pc := v.Pointer()
-	rf := runtime.FuncForPC(pc)
-	if rf == nil {
-		panic("rewire: cannot resolve function name")
-	}
-	return rf.Name()
+	return runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name()
 }

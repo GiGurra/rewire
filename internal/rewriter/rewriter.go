@@ -78,14 +78,16 @@ func RewriteSource(src []byte, funcName string) ([]byte, error) {
 	isVariadic := isVariadicFunc(target.Type)
 
 	// Determine names
-	var mockVarName, realFuncName, wrapperName string
+	var mockVarName, realFuncName, realVarName, wrapperName string
 	if isMethod {
 		mockVarName = fmt.Sprintf("Mock_%s_%s", typeName, methodName)
 		realFuncName = fmt.Sprintf("_real_%s_%s", typeName, methodName)
+		realVarName = fmt.Sprintf("Real_%s_%s", typeName, methodName)
 		wrapperName = methodName
 	} else {
 		mockVarName = "Mock_" + funcName
 		realFuncName = "_real_" + funcName
+		realVarName = "Real_" + funcName
 		wrapperName = funcName
 	}
 
@@ -169,15 +171,31 @@ func RewriteSource(src []byte, funcName string) ([]byte, error) {
 		}
 	}
 
-	// Generate mock var + wrapper as source text, then parse to AST
+	// Build the RHS expression for the exported Real_ alias.
+	// For plain funcs: just the renamed function identifier.
+	// For methods: a method expression (*Type).<_real_name> or Type.<_real_name>.
+	var realAliasRHS string
+	if isMethod {
+		if isPointer {
+			realAliasRHS = fmt.Sprintf("(*%s).%s", typeName, realFuncName)
+		} else {
+			realAliasRHS = fmt.Sprintf("%s.%s", typeName, realFuncName)
+		}
+	} else {
+		realAliasRHS = realFuncName
+	}
+
+	// Generate mock var + real alias + wrapper as source text, then parse to AST
 	genSrc := fmt.Sprintf(`package %s
 
 var %s %s
 
+var %s = %s
+
 func %s%s(%s) %s {
 	%s
 }
-`, file.Name.Name, mockVarName, mockVarType, recvDecl, wrapperName, paramsSrc, resultsSrc, mockBody)
+`, file.Name.Name, mockVarName, mockVarType, realVarName, realAliasRHS, recvDecl, wrapperName, paramsSrc, resultsSrc, mockBody)
 
 	genFset := token.NewFileSet()
 	genFile, err := parser.ParseFile(genFset, "", genSrc, parser.ParseComments)
@@ -188,11 +206,12 @@ func %s%s(%s) %s {
 	// Rename the original to _real_
 	target.Name.Name = realFuncName
 
-	// Replace the original decl with: var + wrapper + renamed original
-	newDecls := make([]ast.Decl, 0, len(file.Decls)+2)
+	// Replace the original decl with: Mock var + Real alias + wrapper + renamed original
+	newDecls := make([]ast.Decl, 0, len(file.Decls)+3)
 	newDecls = append(newDecls, file.Decls[:targetIdx]...)
 	newDecls = append(newDecls, genFile.Decls[0]) // var Mock_X
-	newDecls = append(newDecls, genFile.Decls[1]) // func wrapper
+	newDecls = append(newDecls, genFile.Decls[1]) // var Real_X = _real_X
+	newDecls = append(newDecls, genFile.Decls[2]) // func wrapper
 	newDecls = append(newDecls, target)            // func _real_X (original, renamed)
 	newDecls = append(newDecls, file.Decls[targetIdx+1:]...)
 	file.Decls = newDecls

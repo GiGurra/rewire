@@ -37,6 +37,8 @@ Rewire produces (in-memory, during compilation only):
 ```go
 var Mock_Greet func(name string) string
 
+var Real_Greet = _real_Greet
+
 func Greet(name string) string {
     if _rewire_mock := Mock_Greet; _rewire_mock != nil {
         return _rewire_mock(name)
@@ -51,6 +53,8 @@ func _real_Greet(name string) string {
 
 The wrapper checks `Mock_Greet` on every call. When nil (the default), the original implementation runs — the overhead is a single nil check.
 
+`Real_Greet` is an exported alias holding the pre-rewrite implementation. `rewire.Real(t, bar.Greet)` looks it up via a second registry so spy-style tests can delegate to the original from inside a mock closure.
+
 ## Method rewriting
 
 Methods follow the same pattern but include the receiver:
@@ -64,6 +68,8 @@ func (s *Server) Handle(req string) string {
 // Rewritten (in-memory)
 var Mock_Server_Handle func(*Server, string) string
 
+var Real_Server_Handle = (*Server)._real_Server_Handle
+
 func (s *Server) Handle(req string) string {
     if _rewire_mock := Mock_Server_Handle; _rewire_mock != nil {
         return _rewire_mock(s, req)
@@ -75,6 +81,8 @@ func (s *Server) _real_Server_Handle(req string) string {
     return "handled " + req
 }
 ```
+
+The `Real_Server_Handle` alias is a method expression of type `func(*Server, string) string`, so a spy can call it as `real(server, req)`.
 
 ## Build cache
 

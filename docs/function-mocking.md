@@ -60,6 +60,30 @@ func TestWelcome_Real(t *testing.T) {
 }
 ```
 
+## Spying: delegating to the real implementation
+
+Sometimes you want the mock to run *in addition to* the real function, not *instead of* it — for counting calls, adding audit behavior, or wrapping the real output. `rewire.Real` returns the pre-rewrite implementation so you can call it from inside your mock:
+
+```go
+func TestBarGreet_WithWrapping(t *testing.T) {
+    realGreet := rewire.Real(t, bar.Greet)
+
+    rewire.Func(t, bar.Greet, func(name string) string {
+        return realGreet(name) + " [wrapped]"
+    })
+
+    got := Welcome("Alice")
+    // Welcome("Alice") → bar.Greet runs the mock, which calls realGreet,
+    // which runs the original body, so got == "Welcome! Hello, Alice! [wrapped]"
+}
+```
+
+This is the same idea as Mockito's spy pattern. A few properties worth knowing:
+
+- **Order doesn't matter.** You can call `rewire.Real` before or after `rewire.Func`, and even from *inside* the mock closure — the returned function value is always the real implementation, never the wrapper.
+- **It works for methods too.** Pass a method expression: `rewire.Real(t, (*bar.Greeter).Greet)` returns a `func(*bar.Greeter, string) string` that invokes the real method when called with a receiver.
+- **The function must be rewritten.** `rewire.Real` only works for functions that are targeted by a `rewire.Func` call somewhere in the test module. If nothing mocks it, rewire never emits the real alias — in that case, just call the function directly.
+
 ## Restoring mocks mid-test
 
 Mocks are normally restored automatically when the test ends (via `t.Cleanup`). If you need to end a mock earlier — for example, mock a dependency during setup but run the actual test body against the real implementation — call `rewire.Restore`:

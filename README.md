@@ -86,6 +86,18 @@ func TestWelcome_Real(t *testing.T) {
 
 Pass the original function and its replacement. No mock variable names, no generated types, no interface wrappers. Mocks are automatically restored after each test via `t.Cleanup`.
 
+**Spy pattern** — use `rewire.Real` to capture the pre-rewrite implementation and delegate to it from inside your mock:
+
+```go
+realGreet := rewire.Real(t, bar.Greet)
+
+rewire.Func(t, bar.Greet, func(name string) string {
+    return realGreet(name) + " [wrapped]"
+})
+```
+
+**Mid-test cleanup** — `rewire.Restore(t, fn)` ends a mock early if you want the real implementation back before the test finishes. Safe to call multiple times.
+
 Requires `GOFLAGS="-toolexec=rewire"` to be set (see [Setup](#recommended-test-specific-environment)).
 
 </details>

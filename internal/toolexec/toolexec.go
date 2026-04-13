@@ -311,6 +311,8 @@ func generateRegistration(compileArgs []string, targets mockTargets) (string, er
 		for _, fn := range e.funcNames {
 			fmt.Fprintf(&b, "\trewire.Register(%q, &%s.%s)\n",
 				e.importPath+"."+fn, e.alias, mockVarName(fn))
+			fmt.Fprintf(&b, "\trewire.RegisterReal(%q, %s.%s)\n",
+				e.importPath+"."+fn, e.alias, realVarName(fn))
 		}
 	}
 	b.WriteString("}\n")
@@ -325,6 +327,14 @@ func generateRegistration(compileArgs []string, targets mockTargets) (string, er
 func mockVarName(targetName string) string {
 	name := strings.NewReplacer("(*", "", ")", "", ".", "_").Replace(targetName)
 	return "Mock_" + name
+}
+
+// realVarName converts a target name to the corresponding Real_ variable name,
+// which holds the pre-rewrite implementation (a function value or method
+// expression, depending on the target).
+func realVarName(targetName string) string {
+	name := strings.NewReplacer("(*", "", ")", "", ".", "_").Replace(targetName)
+	return "Real_" + name
 }
 
 func execTool(tool string, args []string) int {
