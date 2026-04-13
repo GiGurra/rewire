@@ -907,6 +907,151 @@ func (p *PlainBag) Add(v int) {
 	assertContains(t, result, "func (p *PlainBag) Add(v int)")
 }
 
+// --- ByInstance rewrites ---
+
+func TestRewriteSourceOpts_ByInstance_PointerMethod(t *testing.T) {
+	src := []byte(`package bar
+
+type Server struct {
+	Name string
+}
+
+func (s *Server) Handle(req string) string {
+	return s.Name + ": " + req
+}
+`)
+	out, err := RewriteSourceOpts(src, "(*Server).Handle", RewriteOptions{ByInstance: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+	t.Log("Rewritten source:\n" + result)
+
+	assertParsesAsGo(t, result)
+	// Per-instance table emitted.
+	assertContains(t, result, "var Mock_Server_Handle_ByInstance sync.Map")
+	// Wrapper still emits the global mock var.
+	assertContains(t, result, "var Mock_Server_Handle func(*Server, string) string")
+	// Wrapper body prepends a per-instance Load on the receiver name.
+	assertContains(t, result, "Mock_Server_Handle_ByInstance.Load(s)")
+	// The type assertion uses the global mock var type.
+	assertContains(t, result, "_rewire_raw.(func(*Server, string) string)")
+	// Dispatch order: per-instance → global → real.
+	assertContains(t, result, "_real_Server_Handle")
+	// sync import was injected.
+	assertContains(t, result, `"sync"`)
+}
+
+func TestRewriteSourceOpts_ByInstance_VoidPointerMethod(t *testing.T) {
+	src := []byte(`package bar
+
+type Bus struct{}
+
+func (b *Bus) Publish(msg string) {
+	_ = msg
+}
+`)
+	out, err := RewriteSourceOpts(src, "(*Bus).Publish", RewriteOptions{ByInstance: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+	t.Log("Rewritten source:\n" + result)
+
+	assertParsesAsGo(t, result)
+	assertContains(t, result, "var Mock_Bus_Publish_ByInstance sync.Map")
+	// Void wrapper uses `return` after the typed callback, not `return _rewire_typed(...)`.
+	assertContains(t, result, "_rewire_typed(b, msg)")
+	assertNotContains(t, result, "return _rewire_typed(b, msg)")
+}
+
+func TestRewriteSourceOpts_ByInstance_RejectsFreeFunction(t *testing.T) {
+	src := []byte(`package bar
+
+func Greet(name string) string {
+	return "hi " + name
+}
+`)
+	_, err := RewriteSourceOpts(src, "Greet", RewriteOptions{ByInstance: true})
+	if err == nil {
+		t.Fatal("expected error for free-function rewrite with ByInstance, got nil")
+	}
+	if !contains(err.Error(), "free function") {
+		t.Errorf("expected error mentioning free function, got: %v", err)
+	}
+}
+
+func TestRewriteSourceOpts_ByInstance_RejectsValueReceiver(t *testing.T) {
+	src := []byte(`package bar
+
+type Point struct {
+	X, Y int
+}
+
+func (p Point) String() string {
+	return "point"
+}
+`)
+	_, err := RewriteSourceOpts(src, "Point.String", RewriteOptions{ByInstance: true})
+	if err == nil {
+		t.Fatal("expected error for value-receiver rewrite with ByInstance, got nil")
+	}
+	if !contains(err.Error(), "value-receiver") {
+		t.Errorf("expected error mentioning value-receiver, got: %v", err)
+	}
+}
+
+func TestRewriteSourceOpts_ByInstance_GenericMethod(t *testing.T) {
+	src := []byte(`package bar
+
+type Container[T any] struct {
+	items []T
+}
+
+func (c *Container[T]) Add(v T) {
+	c.items = append(c.items, v)
+}
+`)
+	out, err := RewriteSourceOpts(src, "(*Container).Add", RewriteOptions{ByInstance: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+	t.Log("Rewritten source:\n" + result)
+
+	assertParsesAsGo(t, result)
+	// Both the per-instance table AND the per-instantiation table exist.
+	assertContains(t, result, "var Mock_Container_Add_ByInstance sync.Map")
+	assertContains(t, result, "var Mock_Container_Add sync.Map")
+	// The per-instance head loads on the receiver name.
+	assertContains(t, result, "Mock_Container_Add_ByInstance.Load(c)")
+	// The per-instance head type-asserts to the generic-method mock fn type.
+	assertContains(t, result, "_rewire_raw.(func(*Container[T], T))")
+	// Per-instantiation dispatch (on reflect.TypeOf(...).String()) is still there after the per-instance head.
+	assertContains(t, result, "Mock_Container_Add.Load(reflect.TypeOf((*Container[T]).Add).String())")
+}
+
+func TestRewriteSourceOpts_ByInstanceOff_NoByInstanceEmission(t *testing.T) {
+	src := []byte(`package bar
+
+type Server struct{}
+
+func (s *Server) Handle(req string) string {
+	return req
+}
+`)
+	out, err := RewriteSourceOpts(src, "(*Server).Handle", RewriteOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+
+	assertParsesAsGo(t, result)
+	// Default path: no _ByInstance table, no sync import.
+	assertNotContains(t, result, "Mock_Server_Handle_ByInstance")
+	assertNotContains(t, result, `"sync"`)
+}
+
 // --- Helpers ---
 
 func assertParsesAsGo(t *testing.T, src string) {

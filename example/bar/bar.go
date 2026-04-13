@@ -14,6 +14,10 @@ func (g *Greeter) Greet(name string) string {
 	return g.Prefix + ", " + name + "!"
 }
 
+func (g *Greeter) Farewell(name string) string {
+	return "Bye " + name + " from " + g.Prefix
+}
+
 // TinyAdd and TinyDouble are deliberately tiny leaf functions that the Go
 // inliner is aggressive about. They exist to verify that rewire's wrapper
 // still fires even when the target function gets inlined into its callers.

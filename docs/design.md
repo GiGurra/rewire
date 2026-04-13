@@ -190,7 +190,7 @@ This covers the "dependency injection" side of mocking: when you have an interfa
 
 Methods use `(*Type).Method` or `Type.Method` syntax, matching Go method expressions and `runtime.FuncForPC` naming conventions. The rewriter generates a mock variable with the receiver as the first parameter (`Mock_Server_Handle func(*Server, string) string`), a wrapper method that forwards the receiver to the mock, and a `_real_` method that preserves the original body. The scanner detects both pointer receiver (`(*pkg.Type).Method`) and value receiver (`pkg.Type.Method`) patterns in test files.
 
-Method mocks are global — all instances of a type share one mock variable. Per-instance mocking would require a map lookup on every call and a different API; for per-instance behavior, Go interfaces are the idiomatic approach.
+Method mocks set via `rewire.Func` are global — all instances of the type share one package-level mock variable. For per-instance scoping, `rewire.InstanceMethod` emits an additional `Mock_Type_Method_ByInstance sync.Map` and a per-instance dispatch ahead of the global mock in the wrapper body. The extra emission is opt-in at compile time: the scanner only triggers it when it finds `rewire.InstanceMethod` / `rewire.RestoreInstanceMethod` calls referencing the target, so tests that only use `rewire.Func` pay no per-call cost.
 
 ## Future work
 

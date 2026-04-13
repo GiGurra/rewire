@@ -46,9 +46,10 @@ func Run(args []string) int {
 	}
 
 	// Load the set of functions to mock (scanned from test files)
-	targets, instantiations := loadOrScanMockTargets(moduleRoot)
+	targets, instantiations, byInstance := loadOrScanMockTargets(moduleRoot)
 
 	funcsToMock := targets[pkgPath]
+	pkgByInstance := byInstance[pkgPath]
 	isTest := hasTestFiles(toolArgs)
 
 	// Reject intrinsic functions early
@@ -68,7 +69,7 @@ func Run(args []string) int {
 		return execTool(tool, toolArgs)
 	}
 
-	rewrittenArgs, cleanup, err := rewriteCompileArgs(toolArgs, pkgPath, funcsToMock, isTest, targets, instantiations)
+	rewrittenArgs, cleanup, err := rewriteCompileArgs(toolArgs, pkgPath, funcsToMock, pkgByInstance, isTest, targets, instantiations, byInstance)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "rewire: rewrite failed for %s: %v\n", pkgPath, err)
 		return 1
@@ -133,7 +134,7 @@ func findFlag(args []string, flag string) string {
 
 // rewriteCompileArgs rewrites only the specific functions listed in funcsToMock.
 // For test compilations, it generates a registration file directly from targets.
-func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, isTest bool, allTargets mockTargets, allInstantiations genericInstantiations) ([]string, func(), error) {
+func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, pkgByInstance map[string]bool, isTest bool, allTargets mockTargets, allInstantiations genericInstantiations, allByInstance byInstanceTargets) ([]string, func(), error) {
 	tmpDir, err := os.MkdirTemp("", "rewire-*")
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating temp dir: %w", err)
@@ -160,7 +161,8 @@ func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, isT
 
 			rewritten := src
 			for _, fn := range funcsToMock {
-				result, err := rewriter.RewriteSource(rewritten, fn)
+				opts := rewriter.RewriteOptions{ByInstance: pkgByInstance[fn]}
+				result, err := rewriter.RewriteSourceOpts(rewritten, fn, opts)
 				if err != nil {
 					if strings.Contains(err.Error(), "not found") {
 						continue
@@ -200,22 +202,33 @@ func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, isT
 		}
 
 		// If any rewritten function is generic, the rewriter added imports
-		// for reflect and sync. Those must be reachable via -importcfg even
-		// if the original source didn't import them.
+		// for reflect and sync. If any rewritten function was rewritten with
+		// ByInstance=true (non-generic method case), the rewriter also added
+		// an import for sync. Both cases need those packages reachable via
+		// -importcfg even if the original source didn't import them.
 		needsReflect := false
 		needsSync := false
 		for _, fn := range funcsToMock {
 			if isGenericFunc(pkgPath, fn) {
 				needsReflect = true
 				needsSync = true
-				break
+			}
+			if pkgByInstance[fn] {
+				needsSync = true
 			}
 		}
 		if needsReflect || needsSync {
-			patched, extraCleanup, err := ensureStdImportsInCfg(newArgs, "reflect", "sync")
+			stdPkgs := []string{}
+			if needsReflect {
+				stdPkgs = append(stdPkgs, "reflect")
+			}
+			if needsSync {
+				stdPkgs = append(stdPkgs, "sync")
+			}
+			patched, extraCleanup, err := ensureStdImportsInCfg(newArgs, stdPkgs...)
 			if err != nil {
 				cleanup()
-				return nil, nil, fmt.Errorf("patching importcfg for generic rewrite: %w", err)
+				return nil, nil, fmt.Errorf("patching importcfg: %w", err)
 			}
 			newArgs = patched
 			if extraCleanup != nil {
@@ -230,7 +243,7 @@ func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, isT
 
 	// For test compilations, generate registration directly from targets
 	if isTest {
-		regFile, err := generateRegistration(args, allTargets, allInstantiations)
+		regFile, err := generateRegistration(args, allTargets, allInstantiations, allByInstance)
 		if err != nil {
 			cleanup()
 			return nil, nil, fmt.Errorf("generating registration: %w", err)
@@ -250,7 +263,7 @@ func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, isT
 
 // generateRegistration creates init() code that registers mock var pointers.
 // It works directly from mock targets — no manifests needed.
-func generateRegistration(compileArgs []string, targets mockTargets, instantiations genericInstantiations) (string, error) {
+func generateRegistration(compileArgs []string, targets mockTargets, instantiations genericInstantiations, byInstance byInstanceTargets) (string, error) {
 	pkgName := ""
 	allImports := map[string]bool{}
 
@@ -357,6 +370,15 @@ func generateRegistration(compileArgs []string, targets mockTargets, instantiati
 			} else {
 				fmt.Fprintf(&b, "\trewire.RegisterReal(%q, %s.%s)\n",
 					e.importPath+"."+fn, e.alias, realVarName(fn))
+			}
+
+			// Methods referenced by rewire.InstanceMethod /
+			// RestoreInstanceMethod need the per-instance table registered.
+			// The rewriter emitted a Mock_Type_Method_ByInstance sync.Map
+			// at the same package level.
+			if byInstance[e.importPath][fn] {
+				fmt.Fprintf(&b, "\trewire.RegisterByInstance(%q, &%s.%s_ByInstance)\n",
+					e.importPath+"."+fn, e.alias, mockVarName(fn))
 			}
 		}
 	}

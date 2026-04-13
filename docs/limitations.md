@@ -1,6 +1,6 @@
 # Limitations
 
-These limitations apply to compile-time function and method mocking (toolexec). Interface mock generation is not affected — if you need per-instance method stubs or any of the behaviors below, use [interface mocks](interface-mocks.md) instead.
+These limitations apply to compile-time function and method mocking (toolexec). Interface mock generation is not affected — if you hit one of the behaviors below, use [interface mocks](interface-mocks.md) instead. Per-instance method stubs are supported natively — see [Per-instance method mocks](method-mocking.md#per-instance-method-mocks).
 
 ## Compiler intrinsics
 

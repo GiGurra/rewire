@@ -28,21 +28,33 @@ type mockTargets map[string][]string
 // a slice of Go source strings (e.g. ["int", "string"]).
 type genericInstantiations map[string]map[string][][]string
 
+// byInstanceTargets identifies (importPath, targetName) pairs that are
+// referenced by at least one rewire.InstanceMethod or
+// rewire.RestoreInstanceMethod call anywhere in the module. The rewriter
+// emits an extra per-instance dispatch path for these, and the codegen
+// emits a RegisterByInstance call so that rewire.InstanceMethod can
+// resolve the per-instance sync.Map.
+//
+// Shape: importPath -> targetName -> true.
+type byInstanceTargets map[string]map[string]bool
+
 // scanCache is the on-disk cache format written by loadOrScanMockTargets.
 type scanCache struct {
-	Targets       mockTargets           `json:"targets"`
+	Targets        mockTargets           `json:"targets"`
 	Instantiations genericInstantiations `json:"instantiations"`
+	ByInstance     byInstanceTargets     `json:"byInstance"`
 }
 
 // loadOrScanMockTargets returns the set of functions that need to be mocked,
-// as declared by rewire.{Func,Real,Restore} calls in test files across the
-// module, along with the specific type-argument combinations referenced
-// for any generic targets.
+// as declared by rewire.{Func,Real,Restore,InstanceMethod,RestoreInstanceMethod}
+// calls in test files across the module, along with the specific
+// type-argument combinations referenced for any generic targets and the
+// subset of targets that need a per-instance dispatch path.
 //
 // Results are cached per build session (keyed on parent PID). A file lock
 // ensures only one toolexec process scans; others block until the cache
 // is ready.
-func loadOrScanMockTargets(moduleRoot string) (mockTargets, genericInstantiations) {
+func loadOrScanMockTargets(moduleRoot string) (mockTargets, genericInstantiations, byInstanceTargets) {
 	cacheDir := filepath.Join(os.TempDir(), fmt.Sprintf("rewire-%d", os.Getppid()))
 	cacheFile := filepath.Join(cacheDir, "mock_targets.json")
 	lockPath := filepath.Join(cacheDir, "mock_targets.lock")
@@ -61,25 +73,26 @@ func loadOrScanMockTargets(moduleRoot string) (mockTargets, genericInstantiation
 	if data, err := os.ReadFile(cacheFile); err == nil {
 		var cache scanCache
 		if json.Unmarshal(data, &cache) == nil && cache.Targets != nil {
-			return cache.Targets, cache.Instantiations
+			return cache.Targets, cache.Instantiations, cache.ByInstance
 		}
 	}
 
 	// We're the first — scan and write cache
-	targets, insts := scanAllTestFiles(moduleRoot)
+	targets, insts, byInst := scanAllTestFiles(moduleRoot)
 
-	if data, err := json.Marshal(scanCache{Targets: targets, Instantiations: insts}); err == nil {
+	if data, err := json.Marshal(scanCache{Targets: targets, Instantiations: insts, ByInstance: byInst}); err == nil {
 		_ = os.WriteFile(cacheFile, data, 0644)
 	}
 
-	return targets, insts
+	return targets, insts, byInst
 }
 
-// scanAllTestFiles walks the module and finds all rewire.{Func,Real,Restore}
-// calls in test files.
-func scanAllTestFiles(moduleRoot string) (mockTargets, genericInstantiations) {
+// scanAllTestFiles walks the module and finds all rewire.{Func,Real,Restore,
+// InstanceMethod,RestoreInstanceMethod} calls in test files.
+func scanAllTestFiles(moduleRoot string) (mockTargets, genericInstantiations, byInstanceTargets) {
 	targets := mockTargets{}
 	insts := genericInstantiations{}
+	byInst := byInstanceTargets{}
 
 	_ = filepath.WalkDir(moduleRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
@@ -95,7 +108,7 @@ func scanAllTestFiles(moduleRoot string) (mockTargets, genericInstantiations) {
 			return nil
 		}
 
-		fileTargets, fileInsts := scanFileForMockCalls(path)
+		fileTargets, fileInsts, fileByInst := scanFileForMockCalls(path)
 		for pkg, funcs := range fileTargets {
 			targets[pkg] = append(targets[pkg], funcs...)
 		}
@@ -105,6 +118,14 @@ func scanAllTestFiles(moduleRoot string) (mockTargets, genericInstantiations) {
 			}
 			for fn, combos := range byFunc {
 				insts[pkg][fn] = append(insts[pkg][fn], combos...)
+			}
+		}
+		for pkg, names := range fileByInst {
+			if byInst[pkg] == nil {
+				byInst[pkg] = map[string]bool{}
+			}
+			for name := range names {
+				byInst[pkg][name] = true
 			}
 		}
 		return nil
@@ -119,7 +140,7 @@ func scanAllTestFiles(moduleRoot string) (mockTargets, genericInstantiations) {
 		}
 	}
 
-	return targets, insts
+	return targets, insts, byInst
 }
 
 func dedupeTypeArgs(combos [][]string) [][]string {
@@ -137,12 +158,14 @@ func dedupeTypeArgs(combos [][]string) [][]string {
 }
 
 // scanFileForMockCalls parses a test file and returns all rewire target
-// references, along with any generic type-argument combinations.
-func scanFileForMockCalls(path string) (mockTargets, genericInstantiations) {
+// references, any generic type-argument combinations, and the subset of
+// targets that need a per-instance dispatch path (those referenced by
+// InstanceMethod / RestoreInstanceMethod).
+func scanFileForMockCalls(path string) (mockTargets, genericInstantiations, byInstanceTargets) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, path, nil, 0)
 	if err != nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	// Build import map: local name → import path
@@ -164,15 +187,21 @@ func scanFileForMockCalls(path string) (mockTargets, genericInstantiations) {
 	}
 
 	if rewireLocalName == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 
-	// Walk AST looking for rewire.Func / rewire.Real / rewire.Restore calls.
-	// All three take the target function as their second argument (after t),
-	// and any one of them should trigger rewriting so the wrapper and the
-	// Real_ alias exist.
+	// Walk AST looking for rewire.{Func,Real,Restore,InstanceMethod,
+	// RestoreInstanceMethod} calls.
+	//
+	// Func/Real/Restore take the target function as their second argument
+	// (index 1), after t.
+	//
+	// InstanceMethod/RestoreInstanceMethod take an instance as their second
+	// argument (index 1) and the target as their third (index 2) — and they
+	// additionally flag the target as needing per-instance emission.
 	targets := mockTargets{}
 	insts := genericInstantiations{}
+	byInst := byInstanceTargets{}
 	ast.Inspect(f, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
@@ -187,18 +216,24 @@ func scanFileForMockCalls(path string) (mockTargets, genericInstantiations) {
 		if !ok || ident.Name != rewireLocalName {
 			return true
 		}
+
+		var targetArgIdx int
+		var needsByInstance bool
 		switch sel.Sel.Name {
 		case "Func", "Real", "Restore":
-			// process below
+			targetArgIdx = 1
+		case "InstanceMethod", "RestoreInstanceMethod":
+			targetArgIdx = 2
+			needsByInstance = true
 		default:
 			return true
 		}
 
-		if len(call.Args) < 2 {
+		if len(call.Args) <= targetArgIdx {
 			return true
 		}
 
-		importPath, targetName, typeArgs := extractMockTarget(call.Args[1], imports, fset)
+		importPath, targetName, typeArgs := extractMockTarget(call.Args[targetArgIdx], imports, fset)
 		if importPath == "" {
 			return true
 		}
@@ -211,10 +246,17 @@ func scanFileForMockCalls(path string) (mockTargets, genericInstantiations) {
 			}
 			insts[importPath][targetName] = append(insts[importPath][targetName], typeArgs)
 		}
+
+		if needsByInstance {
+			if byInst[importPath] == nil {
+				byInst[importPath] = map[string]bool{}
+			}
+			byInst[importPath][targetName] = true
+		}
 		return true
 	})
 
-	return targets, insts
+	return targets, insts, byInst
 }
 
 func exprSource(expr ast.Expr, fset *token.FileSet) string {

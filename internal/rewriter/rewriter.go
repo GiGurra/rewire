@@ -12,6 +12,20 @@ import (
 	"strings"
 )
 
+// RewriteOptions tweaks the output of RewriteSourceOpts. Zero value is
+// the default rewrite (global mock variable only). Set ByInstance to
+// emit an additional per-instance dispatch path for pointer-receiver
+// methods.
+type RewriteOptions struct {
+	// ByInstance, when true, causes the rewriter to emit an extra
+	// Mock_Type_Method_ByInstance sync.Map and a per-instance lookup
+	// in the wrapper body, ahead of the global-mock and real-impl
+	// dispatch. Only legal for pointer-receiver methods (including
+	// methods on generic types). Rejected with a clear error for free
+	// functions, value-receiver methods, and plain generic functions.
+	ByInstance bool
+}
+
 // RewriteSource takes Go source code and a function name, and returns
 // modified source where the function is made swappable via a Mock_ variable.
 //
@@ -32,6 +46,12 @@ import (
 //
 //	func _real_Hello(name string) string { return "hello " + name }
 func RewriteSource(src []byte, funcName string) ([]byte, error) {
+	return RewriteSourceOpts(src, funcName, RewriteOptions{})
+}
+
+// RewriteSourceOpts is RewriteSource with tunable options. See
+// RewriteOptions.
+func RewriteSourceOpts(src []byte, funcName string, opts RewriteOptions) ([]byte, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "", src, parser.ParseComments)
 	if err != nil {
@@ -40,6 +60,16 @@ func RewriteSource(src []byte, funcName string) ([]byte, error) {
 
 	// Detect method syntax: (*Type).Method or Type.Method
 	typeName, methodName, isPointer, isMethod := parseMethodTarget(funcName)
+
+	// ByInstance is only meaningful for pointer-receiver methods.
+	if opts.ByInstance {
+		if !isMethod {
+			return nil, fmt.Errorf("per-instance rewrite requested for free function %q — use rewire.Func instead", funcName)
+		}
+		if !isPointer {
+			return nil, fmt.Errorf("per-instance rewrite requested for value-receiver method %q — value receivers are copied on every call and have no stable identity", funcName)
+		}
+	}
 
 	// Find the target declaration
 	var target *ast.FuncDecl
@@ -87,7 +117,7 @@ func RewriteSource(src []byte, funcName string) ([]byte, error) {
 	// the receiver type spec in the file and branch if found.
 	if isMethod {
 		if typeTypeParams := findTypeDeclTypeParams(file, typeName); typeTypeParams != nil {
-			return rewriteGenericMethod(fset, file, target, targetIdx, typeName, methodName, isPointer, typeTypeParams)
+			return rewriteGenericMethod(fset, file, target, targetIdx, typeName, methodName, isPointer, typeTypeParams, opts.ByInstance)
 		}
 	}
 
@@ -97,9 +127,10 @@ func RewriteSource(src []byte, funcName string) ([]byte, error) {
 	isVariadic := isVariadicFunc(target.Type)
 
 	// Determine names
-	var mockVarName, realFuncName, realVarName, wrapperName string
+	var mockVarName, byInstanceVarName, realFuncName, realVarName, wrapperName string
 	if isMethod {
 		mockVarName = fmt.Sprintf("Mock_%s_%s", typeName, methodName)
+		byInstanceVarName = fmt.Sprintf("Mock_%s_%s_ByInstance", typeName, methodName)
 		realFuncName = fmt.Sprintf("_real_%s_%s", typeName, methodName)
 		realVarName = fmt.Sprintf("Real_%s_%s", typeName, methodName)
 		wrapperName = methodName
@@ -108,6 +139,7 @@ func RewriteSource(src []byte, funcName string) ([]byte, error) {
 		realFuncName = "_real_" + funcName
 		realVarName = "Real_" + funcName
 		wrapperName = funcName
+		_ = byInstanceVarName // not used for free functions
 	}
 
 	// Build call args (with variadic spread on last param)
@@ -117,10 +149,11 @@ func RewriteSource(src []byte, funcName string) ([]byte, error) {
 	mockCallArgs := callArgs
 	realCallExpr := fmt.Sprintf("%s(%s)", realFuncName, callArgs)
 	recvDecl := ""
+	recvName := ""
 
 	if isMethod {
 		recvField := target.Recv.List[0]
-		recvName := "_rewire_recv"
+		recvName = "_rewire_recv"
 		if len(recvField.Names) > 0 && recvField.Names[0].Name != "" {
 			recvName = recvField.Names[0].Name
 		}
@@ -163,15 +196,40 @@ func RewriteSource(src []byte, funcName string) ([]byte, error) {
 		mockVarType = funcTypeSrc
 	}
 
-	// Build wrapper body
+	// Build wrapper body.
+	//
+	// When opts.ByInstance is set (pointer-receiver methods only),
+	// prepend a per-instance dispatch that looks up the receiver in
+	// Mock_Type_Method_ByInstance. The stored value's dynamic type is
+	// the method's mock function type with the receiver as first arg,
+	// so the assertion uses mockVarType.
 	var mockBody string
+	byInstanceHead := ""
+	if opts.ByInstance {
+		if hasResults {
+			byInstanceHead = fmt.Sprintf(`if _rewire_raw, _rewire_ok := %s.Load(%s); _rewire_ok {
+		if _rewire_typed, _rewire_ok := _rewire_raw.(%s); _rewire_ok {
+			return _rewire_typed(%s)
+		}
+	}
+	`, byInstanceVarName, recvName, mockVarType, mockCallArgs)
+		} else {
+			byInstanceHead = fmt.Sprintf(`if _rewire_raw, _rewire_ok := %s.Load(%s); _rewire_ok {
+		if _rewire_typed, _rewire_ok := _rewire_raw.(%s); _rewire_ok {
+			_rewire_typed(%s)
+			return
+		}
+	}
+	`, byInstanceVarName, recvName, mockVarType, mockCallArgs)
+		}
+	}
 	if hasResults {
-		mockBody = fmt.Sprintf(`if _rewire_mock := %s; _rewire_mock != nil {
+		mockBody = byInstanceHead + fmt.Sprintf(`if _rewire_mock := %s; _rewire_mock != nil {
 		return _rewire_mock(%s)
 	}
 	return %s`, mockVarName, mockCallArgs, realCallExpr)
 	} else {
-		mockBody = fmt.Sprintf(`if _rewire_mock := %s; _rewire_mock != nil {
+		mockBody = byInstanceHead + fmt.Sprintf(`if _rewire_mock := %s; _rewire_mock != nil {
 		_rewire_mock(%s)
 		return
 	}
@@ -204,17 +262,22 @@ func RewriteSource(src []byte, funcName string) ([]byte, error) {
 		realAliasRHS = realFuncName
 	}
 
-	// Generate mock var + real alias + wrapper as source text, then parse to AST
+	// Generate mock var + (optional) by-instance sync.Map + real alias +
+	// wrapper as source text, then parse to AST.
+	byInstanceDeclSrc := ""
+	if opts.ByInstance {
+		byInstanceDeclSrc = fmt.Sprintf("\nvar %s sync.Map\n", byInstanceVarName)
+	}
 	genSrc := fmt.Sprintf(`package %s
 
 var %s %s
-
+%s
 var %s = %s
 
 func %s%s(%s) %s {
 	%s
 }
-`, file.Name.Name, mockVarName, mockVarType, realVarName, realAliasRHS, recvDecl, wrapperName, paramsSrc, resultsSrc, mockBody)
+`, file.Name.Name, mockVarName, mockVarType, byInstanceDeclSrc, realVarName, realAliasRHS, recvDecl, wrapperName, paramsSrc, resultsSrc, mockBody)
 
 	genFset := token.NewFileSet()
 	genFile, err := parser.ParseFile(genFset, "", genSrc, parser.ParseComments)
@@ -232,15 +295,22 @@ func %s%s(%s) %s {
 	// Rename the original to _real_
 	target.Name.Name = realFuncName
 
-	// Replace the original decl with: Mock var + Real alias + wrapper + renamed original
-	newDecls := make([]ast.Decl, 0, len(file.Decls)+3)
+	// Replace the original decl with: Mock var [+ ByInstance var] + Real
+	// alias + wrapper + renamed original. The number of spliced decls
+	// varies depending on whether ByInstance is on.
+	newDecls := make([]ast.Decl, 0, len(file.Decls)+4)
 	newDecls = append(newDecls, file.Decls[:targetIdx]...)
-	newDecls = append(newDecls, genFile.Decls[0]) // var Mock_X
-	newDecls = append(newDecls, genFile.Decls[1]) // var Real_X = _real_X
-	newDecls = append(newDecls, genFile.Decls[2]) // func wrapper
-	newDecls = append(newDecls, target)            // func _real_X (original, renamed)
+	newDecls = append(newDecls, genFile.Decls...) // all generated decls
+	newDecls = append(newDecls, target)           // func _real_X (original, renamed)
 	newDecls = append(newDecls, file.Decls[targetIdx+1:]...)
 	file.Decls = newDecls
+
+	// When ByInstance is set, the generated wrapper references sync.Map,
+	// so the target file must import "sync" even if the original source
+	// didn't.
+	if opts.ByInstance {
+		ensureImport(file, "sync")
+	}
 
 	var buf bytes.Buffer
 	if err := format.Node(&buf, fset, file); err != nil {
@@ -447,12 +517,13 @@ func findTypeDeclTypeParams(file *ast.File, typeName string) *ast.FieldList {
 // The method itself can't declare type parameters (Go 1.18+ forbids it),
 // so all type params come from the receiver's type declaration, passed
 // in as typeTypeParams.
-func rewriteGenericMethod(fset *token.FileSet, file *ast.File, target *ast.FuncDecl, targetIdx int, typeName, methodName string, isPointer bool, typeTypeParams *ast.FieldList) ([]byte, error) {
+func rewriteGenericMethod(fset *token.FileSet, file *ast.File, target *ast.FuncDecl, targetIdx int, typeName, methodName string, isPointer bool, typeTypeParams *ast.FieldList, byInstance bool) ([]byte, error) {
 	params := ensureParamNames(target.Type.Params)
 	hasResults := target.Type.Results != nil && len(target.Type.Results.List) > 0
 	isVariadic := isVariadicFunc(target.Type)
 
 	mockVarName := fmt.Sprintf("Mock_%s_%s", typeName, methodName)
+	byInstanceVarName := fmt.Sprintf("Mock_%s_%s_ByInstance", typeName, methodName)
 	realFuncName := fmt.Sprintf("_real_%s_%s", typeName, methodName)
 	realAliasName := fmt.Sprintf("Real_%s_%s", typeName, methodName)
 	wrapperName := methodName
@@ -523,9 +594,34 @@ func rewriteGenericMethod(fset *token.FileSet, file *ast.File, target *ast.FuncD
 		mockCallArgs += ", " + callArgs
 	}
 
+	// Optional per-instance dispatch head. For generic methods we also
+	// key on the receiver value (any(recvName)). The per-instance sync.Map
+	// is shared across all instantiations of the generic type, but
+	// interface equality includes the dynamic type, so *Container[int]
+	// and *Container[string] keys never collide even at the same address.
+	byInstanceHead := ""
+	if byInstance {
+		if hasResults {
+			byInstanceHead = fmt.Sprintf(`if _rewire_raw, _rewire_ok := %s.Load(%s); _rewire_ok {
+		if _rewire_typed, _rewire_ok := _rewire_raw.(%s); _rewire_ok {
+			return _rewire_typed(%s)
+		}
+	}
+	`, byInstanceVarName, recvName, mockFnType, mockCallArgs)
+		} else {
+			byInstanceHead = fmt.Sprintf(`if _rewire_raw, _rewire_ok := %s.Load(%s); _rewire_ok {
+		if _rewire_typed, _rewire_ok := _rewire_raw.(%s); _rewire_ok {
+			_rewire_typed(%s)
+			return
+		}
+	}
+	`, byInstanceVarName, recvName, mockFnType, mockCallArgs)
+		}
+	}
+
 	var wrapperBody, realAliasBody string
 	if hasResults {
-		wrapperBody = fmt.Sprintf(`if _rewire_raw, _rewire_ok := %s.Load(reflect.TypeOf(%s).String()); _rewire_ok {
+		wrapperBody = byInstanceHead + fmt.Sprintf(`if _rewire_raw, _rewire_ok := %s.Load(reflect.TypeOf(%s).String()); _rewire_ok {
 		if _rewire_typed, _rewire_ok := _rewire_raw.(%s); _rewire_ok {
 			return _rewire_typed(%s)
 		}
@@ -533,7 +629,7 @@ func rewriteGenericMethod(fset *token.FileSet, file *ast.File, target *ast.FuncD
 	return %s.%s(%s)`, mockVarName, methodExprStr, mockFnType, mockCallArgs, recvName, realFuncName, callArgs)
 		realAliasBody = fmt.Sprintf("return %s.%s(%s)", recvName, realFuncName, callArgs)
 	} else {
-		wrapperBody = fmt.Sprintf(`if _rewire_raw, _rewire_ok := %s.Load(reflect.TypeOf(%s).String()); _rewire_ok {
+		wrapperBody = byInstanceHead + fmt.Sprintf(`if _rewire_raw, _rewire_ok := %s.Load(reflect.TypeOf(%s).String()); _rewire_ok {
 		if _rewire_typed, _rewire_ok := _rewire_raw.(%s); _rewire_ok {
 			_rewire_typed(%s)
 			return
@@ -551,10 +647,14 @@ func rewriteGenericMethod(fset *token.FileSet, file *ast.File, target *ast.FuncD
 		realAliasParams += ", " + paramsSrc
 	}
 
+	byInstanceDeclSrc := ""
+	if byInstance {
+		byInstanceDeclSrc = fmt.Sprintf("\nvar %s sync.Map\n", byInstanceVarName)
+	}
 	genSrc := fmt.Sprintf(`package %s
 
 var %s sync.Map
-
+%s
 func %s%s(%s) %s {
 	%s
 }
@@ -563,7 +663,7 @@ func %s %s(%s) %s {
 	%s
 }
 `, file.Name.Name,
-		mockVarName,
+		mockVarName, byInstanceDeclSrc,
 		realAliasName, typeParamsDecl, realAliasParams, resultsSrc, realAliasBody,
 		recvDeclSrc, wrapperName, paramsSrc, resultsSrc, wrapperBody,
 	)
@@ -573,15 +673,16 @@ func %s %s(%s) %s {
 	if err != nil {
 		return nil, fmt.Errorf("parsing generated generic-method wrapper (this is a bug in rewire):\n%s\nerror: %w", genSrc, err)
 	}
-	if len(genFile.Decls) != 3 {
-		return nil, fmt.Errorf("internal error: expected 3 generated decls for generic method, got %d", len(genFile.Decls))
+	expectedDecls := 3
+	if byInstance {
+		expectedDecls = 4
 	}
-	newMock := genFile.Decls[0]       // var Mock_X sync.Map
-	newRealAlias := genFile.Decls[1]  // func Real_X[...]
-	newWrapper := genFile.Decls[2]    // func (recv *Type[T]) X(...)
-	clearNodePositions(newMock)
-	clearNodePositions(newRealAlias)
-	clearNodePositions(newWrapper)
+	if len(genFile.Decls) != expectedDecls {
+		return nil, fmt.Errorf("internal error: expected %d generated decls for generic method, got %d", expectedDecls, len(genFile.Decls))
+	}
+	for _, d := range genFile.Decls {
+		clearNodePositions(d)
+	}
 
 	// Rename the original method to _real_Type_Method. It stays a method
 	// with the original receiver (still `func (c *Container[T]) _real_X(...)`).
@@ -589,11 +690,9 @@ func %s %s(%s) %s {
 
 	// Splice BEFORE ensureImport — see the comment in rewriteGenericFunction
 	// for why (stale targetIdx if ensureImport prepends an import decl).
-	newDecls := make([]ast.Decl, 0, len(file.Decls)+3)
+	newDecls := make([]ast.Decl, 0, len(file.Decls)+expectedDecls)
 	newDecls = append(newDecls, file.Decls[:targetIdx]...)
-	newDecls = append(newDecls, newMock)
-	newDecls = append(newDecls, newRealAlias)
-	newDecls = append(newDecls, newWrapper)
+	newDecls = append(newDecls, genFile.Decls...)
 	newDecls = append(newDecls, target)
 	newDecls = append(newDecls, file.Decls[targetIdx+1:]...)
 	file.Decls = newDecls

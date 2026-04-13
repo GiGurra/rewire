@@ -279,7 +279,7 @@ This is simpler but means `go build` also rewrites targeted functions. The overh
 <details>
 <summary><strong>Limitations</strong> — function/method mocking (toolexec)</summary>
 
-These limitations apply to compile-time function/method mocking only, not interface mock generation. If you need per-instance method stubs (different behavior per object), use rewire's [interface mock generation](#interface-mock-generation--generate-mock-structs-for-dependency-injection) instead — that's a separate API for the dependency-injection style.
+These limitations apply to compile-time function/method mocking only, not interface mock generation. For per-instance method stubs (different behavior per object) rewire ships `rewire.InstanceMethod` — see [Per-instance method mocks](https://gigurra.github.io/rewire/method-mocking/#per-instance-method-mocks).
 
 - **Compiler intrinsics** — functions like `math.Abs`, `math.Sqrt`, `math.Floor` are replaced with CPU instructions by the compiler. Rewire detects these and fails with a clear error. Use non-intrinsic alternatives (e.g., `math.Pow` works fine).
 - **No parallel mock safety** — parallel tests in the same package should not mock the same function with different replacements. The mock variable is shared across parallel goroutines.

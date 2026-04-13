@@ -30,9 +30,9 @@ func TestPoint_String(t *testing.T) {
 
 For value receivers, use `Type.Method` (no parentheses or star).
 
-## Method mocks are global
+## Global by default
 
-Method mocks apply to **all instances** of the type, not a specific object. When you mock `(*Greeter).Greet`, every `*Greeter` in the test uses the replacement:
+Method mocks set via `rewire.Func` apply to **all instances** of the type, not a specific object. When you mock `(*Greeter).Greet`, every `*Greeter` in the test uses the replacement:
 
 ```go
 rewire.Func(t, (*bar.Greeter).Greet, func(g *bar.Greeter, name string) string {
@@ -46,7 +46,103 @@ g1.Greet("Alice") // "mocked"
 g2.Greet("Bob")   // also "mocked"
 ```
 
-This is consistent with how function mocking works — the mock variable is package-level. For per-instance behavior, use [interface mocks](interface-mocks.md) instead.
+This is consistent with how function mocking works — the mock variable is package-level. If you want per-instance scoping without changing your production code to take an interface, see [Per-instance method mocks](#per-instance-method-mocks) below.
+
+## Per-instance method mocks
+
+`rewire.InstanceMethod` scopes a method replacement to one specific receiver. Other instances of the same type keep running the real implementation (or the global mock, if one is set).
+
+```go
+func TestInstanceMethod_ScopedToOneInstance(t *testing.T) {
+    g1 := &bar.Greeter{Prefix: "Hi"}
+    g2 := &bar.Greeter{Prefix: "Hello"}
+
+    rewire.InstanceMethod(t, g1, (*bar.Greeter).Greet, func(g *bar.Greeter, name string) string {
+        return "g1-mock: " + name
+    })
+
+    g1.Greet("Alice") // "g1-mock: Alice"  — per-instance mock
+    g2.Greet("Bob")   // "Hello, Bob!"      — real body
+}
+```
+
+The replacement's signature is the same as a `rewire.Func` method replacement: the receiver is the first parameter, followed by the method's own parameters.
+
+### Dispatch order
+
+Inside a method wrapper, rewire checks three places in order:
+
+1. **Per-instance mock** (set via `rewire.InstanceMethod`) — matched by the receiver pointer.
+2. **Global mock** (set via `rewire.Func`) — applies to any instance with no per-instance mock.
+3. **Real implementation** — unchanged production code.
+
+A per-instance mock always overrides a global mock for the same target:
+
+```go
+func TestInstanceMethod_OverridesGlobal(t *testing.T) {
+    g1 := &bar.Greeter{Prefix: "Hi"}
+    g2 := &bar.Greeter{Prefix: "Hello"}
+
+    rewire.Func(t, (*bar.Greeter).Greet, func(g *bar.Greeter, name string) string {
+        return "global: " + name
+    })
+    rewire.InstanceMethod(t, g1, (*bar.Greeter).Greet, func(g *bar.Greeter, name string) string {
+        return "g1-mock: " + name
+    })
+
+    g1.Greet("Alice") // "g1-mock: Alice" — per-instance wins
+    g2.Greet("Bob")   // "global: Bob"    — global fallback
+}
+```
+
+### Multiple methods on one instance
+
+You can set per-instance mocks for several methods on the same receiver. They're independent entries:
+
+```go
+rewire.InstanceMethod(t, g, (*bar.Greeter).Greet,    mockGreet)
+rewire.InstanceMethod(t, g, (*bar.Greeter).Farewell, mockFarewell)
+```
+
+### Mid-test restore
+
+Each `InstanceMethod` call registers its own `t.Cleanup`, so per-instance mocks are automatically restored at test end. Two helpers let you clear mocks earlier:
+
+```go
+// Clear every per-instance mock bound to this instance, for all methods.
+rewire.Restore(t, g)
+
+// Clear one specific per-instance entry, leaving other methods untouched.
+rewire.RestoreInstanceMethod(t, g, (*bar.Greeter).Greet)
+```
+
+`rewire.Restore(t, target)` is overloaded: if `target` is a function/method expression, it clears the global mock (original behavior); if `target` is an instance value, it walks every per-method table and clears entries scoped to that instance.
+
+### Generic methods
+
+Per-instance mocking works for methods on generic types too. Scope applies per instantiation and per receiver:
+
+```go
+func TestInstanceMethod_GenericMethod(t *testing.T) {
+    c1 := &bar.Container[int]{}
+    c2 := &bar.Container[int]{}
+
+    rewire.InstanceMethod(t, c1, (*bar.Container[int]).Add, func(c *bar.Container[int], v int) {
+        // swallow — c1 never actually appends
+    })
+
+    c1.Add(1)  // routed to per-instance mock
+    c2.Add(2)  // real body — c2.Len() == 1
+}
+```
+
+Interface equality on the per-instance key compares both dynamic type and pointer value, so `*Container[int]` and `*Container[string]` entries never collide even at the same address.
+
+### Restrictions
+
+- **Pointer receivers only.** Value-receiver methods are copied on every call and have no stable identity to key on. The test fails immediately with a clear error.
+- **Free functions are not supported.** There's nothing to scope to — use `rewire.Func` instead.
+- **Requires `-toolexec=rewire`.** The compiler wrapper has to be emitted with per-instance support, which happens automatically whenever any test in the module references the target via `InstanceMethod` or `RestoreInstanceMethod`.
 
 ## Method expressions vs. method values
 

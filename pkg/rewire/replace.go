@@ -11,8 +11,9 @@ import (
 )
 
 var (
-	registry     sync.Map // func name (string) → mock var pointer (any)
-	realRegistry sync.Map // func name (string) → real function value (any)
+	registry           sync.Map // func name (string) → mock var pointer (any)
+	realRegistry       sync.Map // func name (string) → real function value (any)
+	byInstanceRegistry sync.Map // func name (string) → *sync.Map (per-method per-instance table)
 )
 
 // Register maps a fully-qualified function name to a pointer to its mock variable.
@@ -33,6 +34,15 @@ func Register(funcName string, mockVarPtr any) {
 func RegisterReal(funcName string, realFn any) {
 	typeKey := reflect.TypeOf(realFn).String()
 	realRegistry.Store(funcName+"|"+typeKey, realFn)
+}
+
+// RegisterByInstance maps a fully-qualified method name to a pointer to
+// its per-instance mock table (a *sync.Map). Called by generated init()
+// code for methods that are referenced by at least one
+// rewire.InstanceMethod / rewire.RestoreInstanceMethod call in the test
+// module. Users should not call it directly.
+func RegisterByInstance(funcName string, byInstanceMap *sync.Map) {
+	byInstanceRegistry.Store(funcName, byInstanceMap)
 }
 
 // Func replaces the implementation of original with replacement for the duration
@@ -164,24 +174,161 @@ func resolveGenericMockMap[F any](t *testing.T, original F) (*sync.Map, bool) {
 	return nil, false
 }
 
-// Restore clears any active mock for original, so subsequent calls in the
-// same test use the real implementation. Restore is optional — the test's
-// automatic cleanup already restores mocks at test end — but it lets you
-// end a mock mid-test.
+// Restore clears active mocks. It has two modes depending on what you
+// pass as the second argument:
 //
-// Restore is idempotent and safe to call any number of times. The automatic
-// cleanup installed by Func still runs correctly afterwards.
-func Restore[F any](t *testing.T, original F) {
+//  1. Function target (e.g. bar.Greet, (*bar.Server).Handle) — clears
+//     the global mock, so subsequent calls use the real implementation.
+//     This is the original behavior.
+//
+//  2. Instance value (a pointer receiver) — clears every per-instance
+//     mock currently scoped to that instance. Useful when a test set up
+//     multiple per-instance mocks via rewire.InstanceMethod and wants to
+//     drop them all mid-test without listing each method.
+//
+// Restore is optional — the test's automatic cleanup already restores
+// mocks at test end — but it lets you end a mock mid-test. It is
+// idempotent and safe to call any number of times.
+func Restore[T any](t *testing.T, target T) {
 	t.Helper()
 
-	// Generic path: delete the instantiation-specific mock entry.
-	if genericMockMap, ok := resolveGenericMockMap(t, original); ok {
-		genericMockMap.Delete(reflect.TypeOf(original).String())
+	// Branch on the runtime kind: functions → global-mock restore,
+	// anything else → treat as an instance and walk the byInstance
+	// registry.
+	v := reflect.ValueOf(target)
+	if !v.IsValid() || v.Kind() != reflect.Func {
+		restoreInstanceAll(target)
 		return
 	}
 
-	elemVal := resolveMockVar(t, original)
+	// Generic path: delete the instantiation-specific mock entry.
+	if genericMockMap, ok := resolveGenericMockMap(t, target); ok {
+		genericMockMap.Delete(reflect.TypeOf(target).String())
+		return
+	}
+
+	elemVal := resolveMockVar(t, target)
 	elemVal.Set(reflect.Zero(elemVal.Type()))
+}
+
+// InstanceMethod installs a per-instance mock for a pointer-receiver
+// method. Unlike rewire.Func, which replaces the method for every
+// instance of the type, InstanceMethod scopes the replacement to one
+// specific receiver. Calls from other instances still go through the
+// global mock (if any) or the real implementation.
+//
+// Dispatch order inside the method wrapper:
+//  1. Per-instance mock matching the receiver, if one is set.
+//  2. Global rewire.Func mock, if one is set.
+//  3. The real implementation.
+//
+// Requires -toolexec=rewire. The compiler wrapper for the target must
+// have been emitted with per-instance support, which happens whenever
+// any test in the module references the target via InstanceMethod or
+// RestoreInstanceMethod.
+//
+// Usage:
+//
+//	s1 := &bar.Server{Name: "primary"}
+//	s2 := &bar.Server{Name: "secondary"}
+//
+//	rewire.InstanceMethod(t, s1, (*bar.Server).Handle, func(s *bar.Server, req string) string {
+//	    return "primary mock: " + req
+//	})
+//	// s2 still runs the real Handle.
+//
+// Restrictions:
+//   - target must be a pointer-receiver method expression (*Type).Method.
+//     Value receivers and free functions are not supported — the test
+//     fails immediately via t.Fatal.
+//   - instance must be a non-nil pointer value.
+//
+// Automatic cleanup via t.Cleanup removes the per-instance entry at
+// test end.
+func InstanceMethod[I any, F any](t *testing.T, instance I, original F, replacement F) {
+	t.Helper()
+
+	if msg := validateFuncArgument(original); msg != "" {
+		t.Fatal(msg)
+		return
+	}
+	if reflect.ValueOf(instance).Kind() != reflect.Pointer || reflect.ValueOf(instance).IsNil() {
+		t.Fatal("rewire.InstanceMethod: instance must be a non-nil pointer value")
+		return
+	}
+
+	m := resolveByInstanceMap(t, original)
+	if m == nil {
+		return
+	}
+
+	// Store as any(instance). Reads from the wrapper use
+	// sync.Map.Load(recv), which box the receiver into an interface
+	// with the same (type, value) and compare by interface equality.
+	m.Store(any(instance), replacement)
+	t.Cleanup(func() { m.Delete(any(instance)) })
+}
+
+// RestoreInstanceMethod clears a single per-instance mock entry set by
+// InstanceMethod. Useful for dropping one method's mock mid-test while
+// leaving other per-instance mocks in place. Idempotent.
+func RestoreInstanceMethod[I any, F any](t *testing.T, instance I, original F) {
+	t.Helper()
+
+	if msg := validateFuncArgument(original); msg != "" {
+		t.Fatal(msg)
+		return
+	}
+
+	m := resolveByInstanceMap(t, original)
+	if m == nil {
+		return
+	}
+	m.Delete(any(instance))
+}
+
+// restoreInstanceAll clears every per-instance mock scoped to instance
+// across every registered per-method table. Called by Restore when the
+// target is not a function value.
+func restoreInstanceAll(instance any) {
+	key := any(instance)
+	byInstanceRegistry.Range(func(_, v any) bool {
+		m, ok := v.(*sync.Map)
+		if ok {
+			m.Delete(key)
+		}
+		return true
+	})
+}
+
+// resolveByInstanceMap returns the per-instance sync.Map for original,
+// or fatally fails the test if no such table exists (target wasn't
+// referenced by any InstanceMethod / RestoreInstanceMethod call, so the
+// rewriter didn't emit the per-instance dispatch).
+func resolveByInstanceMap[F any](t *testing.T, original F) *sync.Map {
+	t.Helper()
+
+	name := funcName(original)
+	if msg := methodValueError(name); msg != "" {
+		t.Fatal(msg)
+		return nil
+	}
+
+	entry, ok := byInstanceRegistry.Load(name)
+	if !ok {
+		t.Fatalf("rewire.InstanceMethod: no per-instance dispatch table registered for %s.\n"+
+			"  InstanceMethod requires the target to be a pointer-receiver method referenced by\n"+
+			"  rewire.InstanceMethod or rewire.RestoreInstanceMethod somewhere in the test module,\n"+
+			"  so that the compiler wrapper is emitted with per-instance support.",
+			name)
+		return nil
+	}
+	m, ok := entry.(*sync.Map)
+	if !ok {
+		t.Fatalf("rewire: internal error: per-instance entry for %s is not a *sync.Map", name)
+		return nil
+	}
+	return m
 }
 
 // resolveMockVar returns a reflect.Value addressing the package-level mock

@@ -79,7 +79,6 @@ Methods on generic types are also supported — `(*bar.Container[int]).Add` is m
 
 These are more fundamental than the items above. We're listing them so expectations are clear, not because we're actively working on them.
 
-- **Per-instance method stubs.** Rewire's method mocks are type-global: mocking `(*Server).Handle` replaces Handle for every `*Server`. You can branch on receiver identity inside the closure, but it's manual. Fundamental to the package-level-variable design.
 - **Parallel test safety.** `t.Parallel()` tests that mock the same function will race on the shared `Mock_` var. Unavoidable without per-goroutine state.
 - **Compiler intrinsics and assembly stubs.** `math.Abs`, `math.Sqrt`, low-level runtime internals. Rewire detects and rejects these. The escape hatch is "wrap it in your own thin function and mock the wrapper."
 - **Unexported functions across packages.** `bar.greet` (lowercase) can only be referenced from inside package `bar`, so the `rewire.Func` call has to live in `bar`'s own `_test.go` file. Doable but breaks the usual "test behavior from outside the package" flow.
