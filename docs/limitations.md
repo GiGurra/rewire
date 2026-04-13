@@ -14,9 +14,9 @@ When you mock a method like `(*Server).Handle`, the mock applies to **all instan
 
 For per-instance behavior, use [interface mocks](interface-mocks.md) instead.
 
-## No generic functions
+## Generic methods
 
-Generic functions (those with type parameters) are skipped during rewriting. Go doesn't allow generic package-level variables, so `var Mock_Map[T, U any]` isn't valid Go.
+Generic *functions* are supported — see [Function Mocking](function-mocking.md#generic-functions). However, methods on generic types (e.g. `func (c *Container[T]) Add(v T)`) are not yet supported. The rewriter will reject them with a clear error.
 
 ## No parallel mock safety
 

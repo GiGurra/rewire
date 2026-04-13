@@ -24,8 +24,15 @@ func Register(funcName string, mockVarPtr any) {
 // RegisterReal maps a fully-qualified function name to its pre-rewrite
 // implementation. Called by generated init() code — users should not call
 // it directly. Used by Real to return the real function for spy-style tests.
+//
+// For non-generic targets there is one real per name. For generic targets
+// there is one real per instantiation (per type-argument combination), and
+// the codegen calls this once per instantiation. The registry key is
+// composed of the function name plus the function's runtime type
+// signature so that generic instantiations don't collide.
 func RegisterReal(funcName string, realFn any) {
-	realRegistry.Store(funcName, realFn)
+	typeKey := reflect.TypeOf(realFn).String()
+	realRegistry.Store(funcName+"|"+typeKey, realFn)
 }
 
 // Func replaces the implementation of original with replacement for the duration
@@ -40,6 +47,16 @@ func RegisterReal(funcName string, realFn any) {
 //	})
 func Func[F any](t *testing.T, original F, replacement F) {
 	t.Helper()
+
+	// For generic functions the registry entry is a *sync.Map keyed on the
+	// type signature of the specific instantiation; each instantiation is
+	// mocked independently.
+	if genericMockMap, ok := resolveGenericMockMap(t, original); ok {
+		key := reflect.TypeOf(original).String()
+		genericMockMap.Store(key, replacement)
+		t.Cleanup(func() { genericMockMap.Delete(key) })
+		return
+	}
 
 	elemVal := resolveMockVar(t, original)
 
@@ -91,7 +108,12 @@ func Real[F any](t *testing.T, original F) F {
 		return zero
 	}
 
-	realFn, ok := realRegistry.Load(name)
+	// Look up via composite key (name + runtime type signature) so
+	// generic instantiations and non-generic functions resolve through
+	// the same path. The codegen emits one RegisterReal per unique
+	// type signature at compile time.
+	typeKey := reflect.TypeOf(original).String()
+	realFn, ok := realRegistry.Load(name + "|" + typeKey)
 	if !ok {
 		t.Fatalf("rewire: no real implementation registered for %s.\n"+
 			"  rewire.Real requires the function to be targeted by a rewire.Func call\n"+
@@ -112,6 +134,36 @@ func Real[F any](t *testing.T, original F) F {
 	return typed
 }
 
+// resolveGenericMockMap checks whether original is a generic-function
+// target and, if so, returns the per-instantiation mock sync.Map. Returns
+// (nil, false) for non-generic targets. Validation of the argument should
+// happen in the caller before this is invoked.
+func resolveGenericMockMap[F any](t *testing.T, original F) (*sync.Map, bool) {
+	t.Helper()
+
+	if msg := validateFuncArgument(original); msg != "" {
+		t.Fatal(msg)
+		return nil, false
+	}
+
+	name := funcName(original)
+
+	if msg := methodValueError(name); msg != "" {
+		t.Fatal(msg)
+		return nil, false
+	}
+
+	entry, ok := registry.Load(name)
+	if !ok {
+		return nil, false
+	}
+	// Non-generic entries are *func(...). Generic entries are *sync.Map.
+	if m, ok := entry.(*sync.Map); ok {
+		return m, true
+	}
+	return nil, false
+}
+
 // Restore clears any active mock for original, so subsequent calls in the
 // same test use the real implementation. Restore is optional — the test's
 // automatic cleanup already restores mocks at test end — but it lets you
@@ -121,6 +173,12 @@ func Real[F any](t *testing.T, original F) F {
 // cleanup installed by Func still runs correctly afterwards.
 func Restore[F any](t *testing.T, original F) {
 	t.Helper()
+
+	// Generic path: delete the instantiation-specific mock entry.
+	if genericMockMap, ok := resolveGenericMockMap(t, original); ok {
+		genericMockMap.Delete(reflect.TypeOf(original).String())
+		return
+	}
 
 	elemVal := resolveMockVar(t, original)
 	elemVal.Set(reflect.Zero(elemVal.Type()))
@@ -233,6 +291,13 @@ func methodValueError(name string) string {
 // funcName assumes f has already been validated as a non-nil function value
 // (see validateFuncArgument). Callers outside resolveMockVar must validate
 // first, or FuncForPC may return nil and this will panic.
+//
+// For generic instantiations, FuncForPC returns a name with a trailing
+// "[...]" placeholder (e.g. "pkg.Map[...]" for every instantiation of
+// Map, regardless of the actual type arguments). We strip it so that
+// registry lookups can use the same key as the codegen-emitted
+// registration calls, which only know the base function name.
 func funcName[F any](f F) string {
-	return runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name()
+	name := runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name()
+	return strings.TrimSuffix(name, "[...]")
 }

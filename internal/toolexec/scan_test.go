@@ -18,7 +18,7 @@ func TestMock(t *testing.T) {
 	rewire.Func(t, bar.Greet, func(name string) string { return "" })
 }
 `)
-	targets := scanFileForMockCalls(path)
+	targets, _ := scanFileForMockCalls(path)
 	assertTarget(t, targets, "example/bar", "Greet")
 }
 
@@ -40,7 +40,7 @@ func TestB(t *testing.T) {
 	rewire.Func(t, math.Pow, func(x, y float64) float64 { return 0 })
 }
 `)
-	targets := scanFileForMockCalls(path)
+	targets, _ := scanFileForMockCalls(path)
 	assertTarget(t, targets, "example/bar", "Greet")
 	assertTarget(t, targets, "math", "Pow")
 }
@@ -58,7 +58,7 @@ func TestMock(t *testing.T) {
 	rw.Func(t, bar.Greet, func(name string) string { return "" })
 }
 `)
-	targets := scanFileForMockCalls(path)
+	targets, _ := scanFileForMockCalls(path)
 	assertTarget(t, targets, "example/bar", "Greet")
 }
 
@@ -75,7 +75,7 @@ func TestMock(t *testing.T) {
 	rewire.Func(t, mybar.Greet, func(name string) string { return "" })
 }
 `)
-	targets := scanFileForMockCalls(path)
+	targets, _ := scanFileForMockCalls(path)
 	assertTarget(t, targets, "example/bar", "Greet")
 }
 
@@ -86,7 +86,7 @@ import "testing"
 
 func TestPlain(t *testing.T) {}
 `)
-	targets := scanFileForMockCalls(path)
+	targets, _ := scanFileForMockCalls(path)
 	if len(targets) != 0 {
 		t.Errorf("expected no targets, got %v", targets)
 	}
@@ -105,7 +105,7 @@ func TestMock(t *testing.T) {
 	rewire.Func(t, (*bar.Server).Handle, func(s *bar.Server, r string) string { return "" })
 }
 `)
-	targets := scanFileForMockCalls(path)
+	targets, _ := scanFileForMockCalls(path)
 	assertTarget(t, targets, "example/bar", "(*Server).Handle")
 }
 
@@ -122,7 +122,7 @@ func TestMock(t *testing.T) {
 	rewire.Func(t, bar.Point.String, func(p bar.Point) string { return "" })
 }
 `)
-	targets := scanFileForMockCalls(path)
+	targets, _ := scanFileForMockCalls(path)
 	assertTarget(t, targets, "example/bar", "Point.String")
 }
 
@@ -148,7 +148,7 @@ func TestC(t *testing.T) {
 	rewire.Func(t, math.Pow, func(x, y float64) float64 { return 0 })
 }
 `)
-	targets := scanFileForMockCalls(path)
+	targets, _ := scanFileForMockCalls(path)
 	assertTarget(t, targets, "example/bar", "Greet")
 	assertTarget(t, targets, "example/bar", "(*Server).Handle")
 	assertTarget(t, targets, "math", "Pow")
@@ -171,7 +171,7 @@ func TestB(t *testing.T) {
 	rewire.Func(t, bar.Greet, func(name string) string { return "b" })
 }
 `)
-	targets := scanFileForMockCalls(path)
+	targets, _ := scanFileForMockCalls(path)
 	assertTarget(t, targets, "example/bar", "Greet")
 	// Should have Greet listed (dedup happens in scanAllTestFiles, not scanFileForMockCalls)
 	count := 0

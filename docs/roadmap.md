@@ -35,15 +35,27 @@ This is fine for light mocking but tedious for tests that verify many interactio
 
 ### 3. Generic functions
 
-**Status:** known gap, not currently planned.
+**Status:** ✅ supported (plain functions).
 
-Generic functions are skipped by the rewriter because Go doesn't allow generic package-level variables — you can't write `var Mock_Map[T, U any] func(...)`. Working around this would require either:
+Generic functions work with the same `rewire.Func` / `rewire.Real` / `rewire.Restore` API as non-generic targets. Each type-argument combination is mocked independently:
 
-- A per-instantiation registry keyed on type parameters
-- Monomorphized mock variables at compile time (one per instantiation actually used)
-- A runtime type-erasing shim
+```go
+rewire.Func(t, bar.Map[int, string], func(in []int, f func(int) string) []string {
+    return []string{"mocked"}
+})
+// bar.Map[float64, bool] still runs the real implementation
+```
 
-None of these are obviously better than "just don't use rewire for generic functions." Most Go mocking libraries don't handle generics well either. Tracked but not prioritized.
+**How it works:**
+
+- The rewriter emits a `sync.Map`-backed mock variable instead of a plain function var, keyed on `reflect.TypeOf(Map[T, U]).String()`. The self-reference inside the generic body produces the concrete instantiation's signature, which matches what the test side computes from the argument function value.
+- For `rewire.Real`, the rewriter emits an exported `Real_X[T...]` generic delegating function. The toolexec scanner collects the specific type-argument combinations referenced in test files, and the codegen emits one `rewire.RegisterReal(...)` call per unique instantiation, materializing each concrete `Real_X[T1, T2]` at compile time. At runtime `rewire.Real` looks up the right entry via a composite `name + typeKey` registry key.
+- `runtime.FuncForPC` reports `pkg.Map[...]` (with a literal `[...]`) for every instantiation, so there's a single canonical name per generic function that the registry lookup uses.
+
+**What's not supported:**
+
+- Generic methods on generic types. The rewriter rejects them with a clear error. Extending method mocking to generics is a separate layering problem.
+- Runtime generic instantiation. Go doesn't allow it; rewire relies on the scanner seeing every instantiation that tests will use at compile time. If a test references `bar.Map[int, string]` without rewire seeing it, `rewire.Real(t, bar.Map[int, string])` will fail with "no real registered" — but this is equivalent to never calling rewire.Func on that instantiation.
 
 ## Bigger gaps we're not tackling (yet)
 

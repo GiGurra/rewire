@@ -72,6 +72,16 @@ func RewriteSource(src []byte, funcName string) ([]byte, error) {
 		return nil, fmt.Errorf("function %q not found", funcName)
 	}
 
+	// Generic functions take a separate code path that emits a sync.Map-
+	// based per-instantiation dispatch table. Generic methods on generic
+	// types are not supported in v1.
+	if target.Type.TypeParams != nil && target.Type.TypeParams.NumFields() > 0 {
+		if isMethod {
+			return nil, fmt.Errorf("generic methods are not yet supported (function %q)", funcName)
+		}
+		return rewriteGenericFunction(src, fset, file, target, funcName)
+	}
+
 	// Extract signature info
 	params := ensureParamNames(target.Type.Params)
 	hasResults := target.Type.Results != nil && len(target.Type.Results.List) > 0
@@ -221,6 +231,243 @@ func %s%s(%s) %s {
 		return nil, fmt.Errorf("formatting output: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// rewriteGenericFunction handles the generic-function branch of RewriteSource.
+// It emits a sync.Map-based per-instantiation dispatch table so that
+// mocking bar.Map[int, string] replaces only the [int, string] instantiation,
+// while other instantiations keep running the real implementation.
+//
+// The generated shape for a function `Map[T, U any](...) ...`:
+//
+//	var Mock_Map sync.Map   // key: type-sig string, value: mock fn (any)
+//
+//	func Real_Map[T, U any](in []T, f func(T) U) []U {
+//	    return _real_Map(in, f)
+//	}
+//
+//	func Map[T, U any](in []T, f func(T) U) []U {
+//	    if _rewire_raw, _rewire_ok := Mock_Map.Load(reflect.TypeOf(Map[T, U]).String()); _rewire_ok {
+//	        if _rewire_typed, _rewire_ok := _rewire_raw.(func([]T, func(T) U) []U); _rewire_ok {
+//	            return _rewire_typed(in, f)
+//	        }
+//	    }
+//	    return _real_Map(in, f)
+//	}
+//
+//	func _real_Map[T, U any](in []T, f func(T) U) []U { /* original body */ }
+//
+// Unlike the non-generic path this works at the text level: it computes
+// the original target function's byte range, substitutes a hand-built
+// replacement block in its place, ensures reflect+sync are imported, and
+// runs the whole thing through go/format.Source. The AST-splice trick
+// used for non-generics breaks down here because we need to inject new
+// imports and the fset position juggling gets ugly.
+func rewriteGenericFunction(src []byte, fset *token.FileSet, file *ast.File, target *ast.FuncDecl, funcName string) ([]byte, error) {
+	params := ensureParamNames(target.Type.Params)
+	hasResults := target.Type.Results != nil && len(target.Type.Results.List) > 0
+	isVariadic := isVariadicFunc(target.Type)
+
+	mockVarName := "Mock_" + funcName
+	realFuncName := "_real_" + funcName
+	realAliasName := "Real_" + funcName
+	wrapperName := funcName
+
+	// Print "[T, U any]" and "[T, U]" — the constrained form for decls
+	// and the bare form for type-argument references.
+	typeParamsSrc, err := fieldListToString(fset, target.Type.TypeParams)
+	if err != nil {
+		return nil, fmt.Errorf("printing type params: %w", err)
+	}
+	typeParamsDecl := "[" + typeParamsSrc + "]"
+
+	var typeParamNames []string
+	for _, field := range target.Type.TypeParams.List {
+		for _, n := range field.Names {
+			typeParamNames = append(typeParamNames, n.Name)
+		}
+	}
+	typeParamRef := "[" + strings.Join(typeParamNames, ", ") + "]"
+
+	paramsSrc, err := fieldListToString(fset, params)
+	if err != nil {
+		return nil, fmt.Errorf("printing params: %w", err)
+	}
+	resultsSrc := ""
+	if hasResults {
+		resultsSrc, err = resultsToString(fset, target.Type.Results)
+		if err != nil {
+			return nil, fmt.Errorf("printing results: %w", err)
+		}
+	}
+
+	callArgs := buildCallArgs(params, isVariadic)
+
+	// The type of the mock function the wrapper expects: the original
+	// signature with no type parameters — at dispatch time T, U, ... are
+	// concrete, so the mock is a plain function type.
+	mockFnType := "func(" + typeOnlyFieldList(fset, params) + ")"
+	if hasResults {
+		mockFnType = "func(" + typeOnlyFieldList(fset, params) + ") " + resultsSrc
+	}
+
+	var wrapperBody, realAliasBody string
+	if hasResults {
+		wrapperBody = fmt.Sprintf(`if _rewire_raw, _rewire_ok := %s.Load(reflect.TypeOf(%s%s).String()); _rewire_ok {
+		if _rewire_typed, _rewire_ok := _rewire_raw.(%s); _rewire_ok {
+			return _rewire_typed(%s)
+		}
+	}
+	return %s(%s)`, mockVarName, wrapperName, typeParamRef, mockFnType, callArgs, realFuncName, callArgs)
+		realAliasBody = fmt.Sprintf("return %s(%s)", realFuncName, callArgs)
+	} else {
+		wrapperBody = fmt.Sprintf(`if _rewire_raw, _rewire_ok := %s.Load(reflect.TypeOf(%s%s).String()); _rewire_ok {
+		if _rewire_typed, _rewire_ok := _rewire_raw.(%s); _rewire_ok {
+			_rewire_typed(%s)
+			return
+		}
+	}
+	%s(%s)`, mockVarName, wrapperName, typeParamRef, mockFnType, callArgs, realFuncName, callArgs)
+		realAliasBody = fmt.Sprintf("%s(%s)", realFuncName, callArgs)
+	}
+
+	// Print the original function body so we can re-emit it under the
+	// renamed _real_ function.
+	origBodySrc, err := nodeToString(fset, target.Body)
+	if err != nil {
+		return nil, fmt.Errorf("printing original body: %w", err)
+	}
+
+	// The full replacement block that will substitute for the original
+	// target function in the source. No package line, no imports — those
+	// live in the rest of the file.
+	replacement := fmt.Sprintf(`var %s sync.Map
+
+func %s%s(%s) %s {
+	%s
+}
+
+func %s%s(%s) %s {
+	%s
+}
+
+func %s%s(%s) %s %s`,
+		mockVarName,
+		realAliasName, typeParamsDecl, paramsSrc, resultsSrc, realAliasBody,
+		wrapperName, typeParamsDecl, paramsSrc, resultsSrc, wrapperBody,
+		realFuncName, typeParamsDecl, paramsSrc, resultsSrc, origBodySrc,
+	)
+
+	// Byte offsets of the original target function in src.
+	startOff := fset.Position(target.Pos()).Offset
+	endOff := fset.Position(target.End()).Offset
+	if startOff < 0 || endOff > len(src) || startOff >= endOff {
+		return nil, fmt.Errorf("internal error: invalid offsets for target %q: [%d:%d)", funcName, startOff, endOff)
+	}
+
+	var buf bytes.Buffer
+	buf.Write(src[:startOff])
+	buf.WriteString(replacement)
+	buf.Write(src[endOff:])
+	result := buf.Bytes()
+
+	// Add reflect+sync imports if not already present.
+	result, err = ensureImportsText(result, "reflect", "sync")
+	if err != nil {
+		return nil, fmt.Errorf("ensuring imports: %w", err)
+	}
+
+	formatted, err := format.Source(result)
+	if err != nil {
+		return nil, fmt.Errorf("formatting generic rewrite output: %w\n---\n%s", err, result)
+	}
+	return formatted, nil
+}
+
+// ensureImportsText adds any of the given import paths that aren't already
+// imported by src. It operates on source text because the rest of the
+// generic rewrite path is also text-based — trying to mix AST mutation
+// with text splicing gets tangled.
+func ensureImportsText(src []byte, pkgs ...string) ([]byte, error) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "", src, parser.ParseComments)
+	if err != nil {
+		return nil, fmt.Errorf("parsing for import check: %w", err)
+	}
+
+	existing := map[string]bool{}
+	for _, imp := range file.Imports {
+		existing[strings.Trim(imp.Path.Value, `"`)] = true
+	}
+
+	var toAdd []string
+	for _, p := range pkgs {
+		if !existing[p] {
+			toAdd = append(toAdd, p)
+		}
+	}
+	if len(toAdd) == 0 {
+		return src, nil
+	}
+
+	// Find an existing import decl we can extend, or plan a new one.
+	var importDecl *ast.GenDecl
+	for _, decl := range file.Decls {
+		if gen, ok := decl.(*ast.GenDecl); ok && gen.Tok == token.IMPORT {
+			importDecl = gen
+			break
+		}
+	}
+
+	var insertText strings.Builder
+	var insertOff int
+
+	if importDecl != nil {
+		// Add new specs before the closing paren (or convert single-line
+		// form to block form).
+		endOff := fset.Position(importDecl.End()).Offset
+		if importDecl.Lparen == token.NoPos {
+			// Single-spec form: `import "foo"` — replace entirely with a block.
+			startOff := fset.Position(importDecl.Pos()).Offset
+			oldSpec, ok := importDecl.Specs[0].(*ast.ImportSpec)
+			if !ok {
+				return nil, fmt.Errorf("unexpected import spec kind")
+			}
+			insertText.WriteString("import (\n")
+			insertText.WriteString("\t")
+			insertText.WriteString(oldSpec.Path.Value)
+			insertText.WriteString("\n")
+			for _, p := range toAdd {
+				fmt.Fprintf(&insertText, "\t%q\n", p)
+			}
+			insertText.WriteString(")")
+			return spliceBytes(src, startOff, endOff, insertText.String()), nil
+		}
+		// Block form: insert new specs before `)`.
+		insertOff = fset.Position(importDecl.Rparen).Offset
+		for _, p := range toAdd {
+			fmt.Fprintf(&insertText, "\t%q\n", p)
+		}
+		return spliceBytes(src, insertOff, insertOff, insertText.String()), nil
+	}
+
+	// No import decl at all — insert a new one right after the package clause.
+	insertOff = fset.Position(file.Name.End()).Offset
+	insertText.WriteString("\n\nimport (\n")
+	for _, p := range toAdd {
+		fmt.Fprintf(&insertText, "\t%q\n", p)
+	}
+	insertText.WriteString(")")
+	return spliceBytes(src, insertOff, insertOff, insertText.String()), nil
+}
+
+func spliceBytes(src []byte, start, end int, replacement string) []byte {
+	var out bytes.Buffer
+	out.Grow(len(src) + len(replacement))
+	out.Write(src[:start])
+	out.WriteString(replacement)
+	out.Write(src[end:])
+	return out.Bytes()
 }
 
 // RewriteFile reads a file, rewrites the named function, and returns the new source.

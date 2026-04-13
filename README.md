@@ -99,6 +99,15 @@ func TestWelcome_Real(t *testing.T) {
 
 Pass the original function and its replacement. No mock variable names, no generated types, no interface wrappers. Mocks are automatically restored after each test via `t.Cleanup`.
 
+**Generic functions** — pass the instantiation you want to mock, and only that instantiation is replaced:
+
+```go
+rewire.Func(t, bar.Map[int, string], func(in []int, f func(int) string) []string {
+    return []string{"mocked"}
+})
+// bar.Map[float64, bool] still runs the real implementation in the same test
+```
+
 **Spy pattern** — use `rewire.Real` to capture the pre-rewrite implementation and delegate to it from inside your mock:
 
 ```go

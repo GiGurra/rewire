@@ -20,3 +20,14 @@ func (g *Greeter) Greet(name string) string {
 func TinyAdd(a, b int) int { return a + b }
 
 func TinyDouble(x int) int { return x * 2 }
+
+// Map is a generic function used to verify rewire's per-instantiation
+// mocking for generics. Each type-argument combination (e.g. Map[int,string]
+// vs Map[float64,bool]) can be mocked independently.
+func Map[T, U any](in []T, f func(T) U) []U {
+	out := make([]U, len(in))
+	for i, v := range in {
+		out[i] = f(v)
+	}
+	return out
+}

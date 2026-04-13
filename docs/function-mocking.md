@@ -116,6 +116,59 @@ This is the same idea as Mockito's spy pattern. A few properties worth knowing:
 - **Order doesn't matter.** You can call `rewire.Real` before or after `rewire.Func`, and even from *inside* the mock closure — the returned function value is always the real implementation, never the wrapper.
 - **It works for methods too.** Pass a method expression: `rewire.Real(t, (*bar.Greeter).Greet)` returns a `func(*bar.Greeter, string) string` that invokes the real method when called with a receiver.
 
+## Generic functions
+
+Generic functions work with the same API — pass the instantiation you want to mock as the argument to `rewire.Func`, and rewire replaces only that instantiation:
+
+```go
+// Production: example/bar/bar.go
+func Map[T, U any](in []T, f func(T) U) []U {
+    out := make([]U, len(in))
+    for i, v := range in {
+        out[i] = f(v)
+    }
+    return out
+}
+```
+
+```go
+// Test: example/foo/foo_test.go
+func TestMap_MockOnlyIntString(t *testing.T) {
+    rewire.Func(t, bar.Map[int, string], func(in []int, f func(int) string) []string {
+        return []string{"mocked"}
+    })
+
+    // bar.Map[int, string] now returns ["mocked"] regardless of input
+    got := bar.Map([]int{1, 2, 3}, func(x int) string { return "real" })
+    // got == ["mocked"]
+
+    // bar.Map[float64, bool] is untouched — still runs the real body
+    got2 := bar.Map([]float64{1, 2}, func(x float64) bool { return x > 0 })
+    // got2 == [true, true]
+}
+```
+
+Mocks are **per-instantiation**: mocking `Map[int, string]` does not affect `Map[float64, bool]` or any other type-argument combination. You can mock multiple instantiations of the same function in a single test and each gets its own independent replacement.
+
+`rewire.Real` and `rewire.Restore` work the same way:
+
+```go
+// Spy on a specific instantiation
+realMap := rewire.Real(t, bar.Map[int, string])
+rewire.Func(t, bar.Map[int, string], func(in []int, f func(int) string) []string {
+    out := realMap(in, f)
+    for i := range out {
+        out[i] += "!"
+    }
+    return out
+})
+```
+
+**Known limitations:**
+
+- Generic *methods* on generic types aren't supported yet — the rewriter will reject them with a clear error. Plain generic functions work.
+- rewire relies on the pre-scan seeing every instantiation your tests will use. An instantiation that only appears inside a `reflect.MakeFunc` or similar dynamic construct wouldn't be picked up, but that's a niche case.
+
 ## Restoring mocks mid-test
 
 Mocks are normally restored automatically when the test ends (via `t.Cleanup`). If you need to end a mock earlier — for example, mock a dependency during setup but run the actual test body against the real implementation — call `rewire.Restore`:

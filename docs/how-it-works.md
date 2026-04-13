@@ -94,6 +94,34 @@ GOFLAGS="-toolexec=rewire" GOCACHE="$HOME/.cache/rewire-test" go test ./...
 
 This keeps `go build` (production) and `go test` (with rewire) from sharing cached artifacts.
 
+## Generic functions
+
+Generic functions take a separate rewrite path because Go doesn't allow generic package-level variables — you can't write `var Mock_Map[T, U any] func(...)`. Instead, the rewriter emits a single `sync.Map` per generic function and dispatches on the concrete instantiation's type signature:
+
+```go
+// Rewritten (in-memory)
+var Mock_Map sync.Map  // key: type-sig string, value: mock fn (any)
+
+func Real_Map[T, U any](in []T, f func(T) U) []U {
+    return _real_Map(in, f)
+}
+
+func Map[T, U any](in []T, f func(T) U) []U {
+    if raw, ok := Mock_Map.Load(reflect.TypeOf(Map[T, U]).String()); ok {
+        if typed, ok := raw.(func([]T, func(T) U) []U); ok {
+            return typed(in, f)
+        }
+    }
+    return _real_Map(in, f)
+}
+
+func _real_Map[T, U any](in []T, f func(T) U) []U { /* original body */ }
+```
+
+The `reflect.TypeOf(Map[T, U]).String()` self-reference produces the concrete instantiation's signature (e.g. `func([]int, func(int) string) []string`), which exactly matches what `reflect.TypeOf(bar.Map[int, string]).String()` produces at the `rewire.Func` call site. Both sides compute the same lookup key with no coordination needed.
+
+Because Go doesn't support runtime generic instantiation, `rewire.Real` for generics requires the concrete instantiations to be materialized at compile time. The toolexec pre-scan collects every type-argument combination referenced in `rewire.{Func,Real,Restore}` calls and the codegen emits one `rewire.RegisterReal("pkg.Map", pkg.Real_Map[int, string])` call per unique instantiation. At runtime `rewire.Real` looks up the registry by a composite `name + typeKey` key.
+
 ## Inlining
 
 Go's compiler aggressively inlines small leaf functions. For rewire-rewritten code, we verified that the inliner inlines:

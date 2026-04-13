@@ -1,7 +1,10 @@
 package toolexec
 
 import (
+	"bytes"
 	"fmt"
+	"go/ast"
+	"go/build"
 	"go/parser"
 	"go/token"
 	"os"
@@ -43,7 +46,7 @@ func Run(args []string) int {
 	}
 
 	// Load the set of functions to mock (scanned from test files)
-	targets := loadOrScanMockTargets(moduleRoot)
+	targets, instantiations := loadOrScanMockTargets(moduleRoot)
 
 	funcsToMock := targets[pkgPath]
 	isTest := hasTestFiles(toolArgs)
@@ -65,7 +68,7 @@ func Run(args []string) int {
 		return execTool(tool, toolArgs)
 	}
 
-	rewrittenArgs, cleanup, err := rewriteCompileArgs(toolArgs, pkgPath, funcsToMock, isTest, targets)
+	rewrittenArgs, cleanup, err := rewriteCompileArgs(toolArgs, pkgPath, funcsToMock, isTest, targets, instantiations)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "rewire: rewrite failed for %s: %v\n", pkgPath, err)
 		return 1
@@ -130,7 +133,7 @@ func findFlag(args []string, flag string) string {
 
 // rewriteCompileArgs rewrites only the specific functions listed in funcsToMock.
 // For test compilations, it generates a registration file directly from targets.
-func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, isTest bool, allTargets mockTargets) ([]string, func(), error) {
+func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, isTest bool, allTargets mockTargets, allInstantiations genericInstantiations) ([]string, func(), error) {
 	tmpDir, err := os.MkdirTemp("", "rewire-*")
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating temp dir: %w", err)
@@ -195,11 +198,39 @@ func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, isT
 					pkgPath, fn)
 			}
 		}
+
+		// If any rewritten function is generic, the rewriter added imports
+		// for reflect and sync. Those must be reachable via -importcfg even
+		// if the original source didn't import them.
+		needsReflect := false
+		needsSync := false
+		for _, fn := range funcsToMock {
+			if isGenericFunc(pkgPath, fn) {
+				needsReflect = true
+				needsSync = true
+				break
+			}
+		}
+		if needsReflect || needsSync {
+			patched, extraCleanup, err := ensureStdImportsInCfg(newArgs, "reflect", "sync")
+			if err != nil {
+				cleanup()
+				return nil, nil, fmt.Errorf("patching importcfg for generic rewrite: %w", err)
+			}
+			newArgs = patched
+			if extraCleanup != nil {
+				prevCleanup := cleanup
+				cleanup = func() {
+					extraCleanup()
+					prevCleanup()
+				}
+			}
+		}
 	}
 
 	// For test compilations, generate registration directly from targets
 	if isTest {
-		regFile, err := generateRegistration(args, allTargets)
+		regFile, err := generateRegistration(args, allTargets, allInstantiations)
 		if err != nil {
 			cleanup()
 			return nil, nil, fmt.Errorf("generating registration: %w", err)
@@ -219,7 +250,7 @@ func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, isT
 
 // generateRegistration creates init() code that registers mock var pointers.
 // It works directly from mock targets — no manifests needed.
-func generateRegistration(compileArgs []string, targets mockTargets) (string, error) {
+func generateRegistration(compileArgs []string, targets mockTargets, instantiations genericInstantiations) (string, error) {
 	pkgName := ""
 	allImports := map[string]bool{}
 
@@ -311,13 +342,191 @@ func generateRegistration(compileArgs []string, targets mockTargets) (string, er
 		for _, fn := range e.funcNames {
 			fmt.Fprintf(&b, "\trewire.Register(%q, &%s.%s)\n",
 				e.importPath+"."+fn, e.alias, mockVarName(fn))
-			fmt.Fprintf(&b, "\trewire.RegisterReal(%q, %s.%s)\n",
-				e.importPath+"."+fn, e.alias, realVarName(fn))
+
+			if isGenericFunc(e.importPath, fn) {
+				// Generic: emit one RegisterReal call per unique
+				// instantiation the scanner found, passing a
+				// concrete function value like `pkg.Real_Map[int,
+				// string]`. rewire.RegisterReal uses reflect.TypeOf
+				// to derive a unique lookup key per type signature.
+				combos := instantiations[e.importPath][fn]
+				for _, typeArgs := range combos {
+					fmt.Fprintf(&b, "\trewire.RegisterReal(%q, %s.%s[%s])\n",
+						e.importPath+"."+fn, e.alias, realVarName(fn), strings.Join(typeArgs, ", "))
+				}
+			} else {
+				fmt.Fprintf(&b, "\trewire.RegisterReal(%q, %s.%s)\n",
+					e.importPath+"."+fn, e.alias, realVarName(fn))
+			}
 		}
 	}
 	b.WriteString("}\n")
 
 	return b.String(), nil
+}
+
+// ensureStdImportsInCfg patches the -importcfg arg to include the given
+// stdlib packages, resolving their export .a files via `go list -export`
+// when they aren't already listed. Returns the updated args and a
+// cleanup function for the temp file if one was created.
+//
+// This is necessary because the Go compiler's -importcfg only lists
+// packages the original source imports. When rewire's rewriter adds
+// imports for reflect/sync, those packages aren't visible to the
+// compiler unless we extend the importcfg.
+func ensureStdImportsInCfg(args []string, pkgs ...string) ([]string, func(), error) {
+	cfgIdx := -1
+	var cfgPath string
+	for i, arg := range args {
+		if arg == "-importcfg" && i+1 < len(args) {
+			cfgIdx = i + 1
+			cfgPath = args[i+1]
+			break
+		}
+	}
+	if cfgIdx < 0 {
+		return args, nil, nil
+	}
+
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading importcfg %s: %w", cfgPath, err)
+	}
+
+	existing := map[string]bool{}
+	for _, line := range strings.Split(string(data), "\n") {
+		rest, ok := strings.CutPrefix(line, "packagefile ")
+		if !ok {
+			continue
+		}
+		if eq := strings.Index(rest, "="); eq > 0 {
+			existing[strings.TrimSpace(rest[:eq])] = true
+		}
+	}
+
+	var missing []string
+	for _, p := range pkgs {
+		if !existing[p] {
+			missing = append(missing, p)
+		}
+	}
+	if len(missing) == 0 {
+		return args, nil, nil
+	}
+
+	exports, err := resolveStdExportPaths(missing)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var buf bytes.Buffer
+	buf.Write(data)
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		buf.WriteByte('\n')
+	}
+	for _, p := range missing {
+		path, ok := exports[p]
+		if !ok || path == "" {
+			return nil, nil, fmt.Errorf("could not resolve export path for %s", p)
+		}
+		fmt.Fprintf(&buf, "packagefile %s=%s\n", p, path)
+	}
+
+	tmp, err := os.CreateTemp("", "rewire-importcfg-*")
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating patched importcfg: %w", err)
+	}
+	if _, err := tmp.Write(buf.Bytes()); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return nil, nil, fmt.Errorf("writing patched importcfg: %w", err)
+	}
+	tmp.Close()
+
+	newArgs := make([]string, len(args))
+	copy(newArgs, args)
+	newArgs[cfgIdx] = tmp.Name()
+
+	cleanup := func() { _ = os.Remove(tmp.Name()) }
+	return newArgs, cleanup, nil
+}
+
+// resolveStdExportPaths runs `go list -export` to find the compiled .a
+// files for each package, with GOFLAGS stripped so the recursive
+// toolexec doesn't fire.
+func resolveStdExportPaths(pkgs []string) (map[string]string, error) {
+	listArgs := append([]string{"list", "-export", "-f", "{{.ImportPath}}|{{.Export}}"}, pkgs...)
+	cmd := exec.Command("go", listArgs...)
+
+	// Strip GOFLAGS to avoid `go list` re-invoking rewire via toolexec.
+	env := os.Environ()
+	filtered := env[:0]
+	for _, e := range env {
+		if !strings.HasPrefix(e, "GOFLAGS=") {
+			filtered = append(filtered, e)
+		}
+	}
+	cmd.Env = filtered
+
+	out, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("go list -export failed: %w\nstderr: %s", err, exitErr.Stderr)
+		}
+		return nil, fmt.Errorf("go list -export failed: %w", err)
+	}
+	result := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		sep := strings.Index(line, "|")
+		if sep < 0 {
+			continue
+		}
+		result[line[:sep]] = line[sep+1:]
+	}
+	return result, nil
+}
+
+// isGenericFunc reports whether the named target function in importPath
+// is defined with type parameters. It resolves the package directory via
+// go/build and AST-parses the package's non-test Go files looking for a
+// matching top-level function declaration.
+//
+// Only plain function names are checked — method targets like
+// "(*Type).Method" or "Type.Method" return false, since generic methods
+// aren't supported. Any parsing failure is treated as "not generic",
+// since a false negative just causes codegen to emit a RegisterReal call
+// that will then fail to compile, surfacing the issue clearly.
+func isGenericFunc(importPath, funcName string) bool {
+	if strings.ContainsAny(funcName, ".(*)") {
+		return false
+	}
+	pkg, err := build.Default.Import(importPath, ".", build.FindOnly)
+	if err != nil || pkg.Dir == "" {
+		return false
+	}
+	entries, err := os.ReadDir(pkg.Dir)
+	if err != nil {
+		return false
+	}
+	fset := token.NewFileSet()
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filepath.Join(pkg.Dir, name), nil, parser.SkipObjectResolution)
+		if err != nil {
+			continue
+		}
+		for _, decl := range file.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || fd.Recv != nil || fd.Name.Name != funcName {
+				continue
+			}
+			return fd.Type.TypeParams != nil && fd.Type.TypeParams.NumFields() > 0
+		}
+	}
+	return false
 }
 
 // mockVarName converts a target name to the corresponding Mock_ variable name.
