@@ -7,7 +7,7 @@
 > **Experimental** — this project is in early development. Both the implementation and APIs may change at any time. Use at your own risk.
 
 Mock anything — free functions, stdlib, third-party, methods, specific instances, interfaces.
-No interface extraction, no dependency-injection plumbing, no `go generate` code generation, no runtime patching.
+No `go generate` code generation, no runtime patching.
 
 ```go
 // Mock a stdlib function:
@@ -29,7 +29,7 @@ e.On("Alice").Returns("hi Alice").Times(1)
 e.OnAny().Returns("hi other")
 ```
 
-One package, one API surface. Every scenario above uses the same underlying mechanism: **rewire intercepts the Go compiler via `-toolexec` and rewrites or synthesizes code in-memory during compilation.** Your source on disk is never modified. Nothing is patched at runtime. No `unsafe`, no platform-specific code, no inline-breaking tricks.
+**rewire intercepts the Go compiler via `-toolexec` and rewrites or synthesizes code in-memory during compilation.** Your source on disk is never modified. Nothing is patched at runtime. No `unsafe`, no platform-specific code, no inline-breaking tricks. Your IDE sees valid syntax.
 
 ## Quick start
 
