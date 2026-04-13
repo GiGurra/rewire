@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/GiGurra/rewire/internal/mockgen"
 	"github.com/GiGurra/rewire/internal/rewriter"
 )
 
@@ -46,7 +47,7 @@ func Run(args []string) int {
 	}
 
 	// Load the set of functions to mock (scanned from test files)
-	targets, instantiations, byInstance := loadOrScanMockTargets(moduleRoot)
+	targets, instantiations, byInstance, _ := loadOrScanMockTargets(moduleRoot)
 
 	funcsToMock := targets[pkgPath]
 	pkgByInstance := byInstance[pkgPath]
@@ -241,8 +242,43 @@ func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, pkg
 		}
 	}
 
-	// For test compilations, generate registration directly from targets
+	// For test compilations, generate interface-mock backing structs
+	// and then the per-target registration file. Mock structs are
+	// emitted first so the registration file can refer to any symbols
+	// they expose (not currently needed, but keeps things clean).
 	if isTest {
+		mockFiles, mockCleanup, err := generateInterfaceMocks(args, tmpDir)
+		if err != nil {
+			cleanup()
+			return nil, nil, fmt.Errorf("generating interface mocks: %w", err)
+		}
+		if mockCleanup != nil {
+			prevCleanup := cleanup
+			cleanup = func() {
+				mockCleanup()
+				prevCleanup()
+			}
+		}
+		if len(mockFiles) > 0 {
+			newArgs = append(newArgs, mockFiles...)
+			// Interface mocks pull in "sync" (for the per-instance
+			// dispatch tables) and may reference packages the original
+			// test source didn't import. Patch the importcfg.
+			patched, extraCleanup, err := ensureStdImportsInCfg(newArgs, "sync")
+			if err != nil {
+				cleanup()
+				return nil, nil, fmt.Errorf("patching importcfg for interface mocks: %w", err)
+			}
+			newArgs = patched
+			if extraCleanup != nil {
+				prevCleanup := cleanup
+				cleanup = func() {
+					extraCleanup()
+					prevCleanup()
+				}
+			}
+		}
+
 		regFile, err := generateRegistration(args, allTargets, allInstantiations, allByInstance)
 		if err != nil {
 			cleanup()
@@ -259,6 +295,135 @@ func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, pkg
 	}
 
 	return newArgs, cleanup, nil
+}
+
+// generateInterfaceMocks finds every rewire.NewMock[I] reference in the
+// test package's source files (scoped to this compilation, not
+// module-wide) and emits a backing struct file for each one into
+// tmpDir. Returns the paths of the generated files so the caller can
+// append them to the compiler args.
+func generateInterfaceMocks(compileArgs []string, tmpDir string) ([]string, func(), error) {
+	// Walk the test files in this compile and collect mocked interface refs.
+	pkgMockedIfaces := mockedInterfaces{}
+	pkgName := ""
+	for _, arg := range compileArgs {
+		if !strings.HasSuffix(arg, ".go") {
+			continue
+		}
+		_, _, _, fileMocks := scanFileForMockCalls(arg)
+		for ip, ifaces := range fileMocks {
+			if pkgMockedIfaces[ip] == nil {
+				pkgMockedIfaces[ip] = map[string]bool{}
+			}
+			for name := range ifaces {
+				pkgMockedIfaces[ip][name] = true
+			}
+		}
+		// Need the test package name for the emitted file's package clause.
+		if pkgName == "" {
+			fset := token.NewFileSet()
+			if f, err := parser.ParseFile(fset, arg, nil, parser.PackageClauseOnly); err == nil {
+				pkgName = f.Name.Name
+			}
+		}
+	}
+	if len(pkgMockedIfaces) == 0 {
+		return nil, nil, nil
+	}
+	if pkgName == "" {
+		return nil, nil, fmt.Errorf("could not determine test package name for interface mock generation")
+	}
+
+	var generatedPaths []string
+	for importPath, ifaces := range pkgMockedIfaces {
+		// Locate the source file in the interface's declaring package
+		// that contains each interface declaration. A single package
+		// can split interfaces across files, so we try each .go file
+		// until we find one that defines the interface.
+		pkgDir, err := resolvePackageDir(importPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("locating package %s for interface mock generation: %w", importPath, err)
+		}
+
+		for ifaceName := range ifaces {
+			srcBytes, err := readInterfaceSource(pkgDir, ifaceName)
+			if err != nil {
+				return nil, nil, fmt.Errorf("reading source of interface %s.%s: %w", importPath, ifaceName, err)
+			}
+
+			alias := defaultPkgAlias(importPath)
+			generated, err := mockgen.GenerateRewireMock(srcBytes, ifaceName, importPath, alias, pkgName)
+			if err != nil {
+				return nil, nil, fmt.Errorf("generating mock for %s.%s: %w", importPath, ifaceName, err)
+			}
+			outPath := filepath.Join(tmpDir, fmt.Sprintf("_rewire_mock_%s_%s_test.go", alias, ifaceName))
+			if err := os.WriteFile(outPath, generated, 0644); err != nil {
+				return nil, nil, fmt.Errorf("writing generated mock file: %w", err)
+			}
+			generatedPaths = append(generatedPaths, outPath)
+		}
+	}
+	return generatedPaths, nil, nil
+}
+
+// resolvePackageDir resolves an import path to an absolute directory
+// containing its source files, via go/build.
+func resolvePackageDir(importPath string) (string, error) {
+	pkg, err := build.Default.Import(importPath, ".", build.FindOnly)
+	if err != nil {
+		return "", err
+	}
+	if pkg.Dir == "" {
+		return "", fmt.Errorf("package %s has no resolved directory", importPath)
+	}
+	return pkg.Dir, nil
+}
+
+// readInterfaceSource finds the .go file in pkgDir that declares
+// ifaceName as an interface type and returns its raw bytes. Test files
+// and generated files are excluded. Returns an error if no file
+// declares the interface.
+func readInterfaceSource(pkgDir, ifaceName string) ([]byte, error) {
+	entries, err := os.ReadDir(pkgDir)
+	if err != nil {
+		return nil, err
+	}
+	fset := token.NewFileSet()
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		fullPath := filepath.Join(pkgDir, name)
+		f, err := parser.ParseFile(fset, fullPath, nil, parser.SkipObjectResolution)
+		if err != nil {
+			continue
+		}
+		for _, decl := range f.Decls {
+			genDecl, ok := decl.(*ast.GenDecl)
+			if !ok || genDecl.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range genDecl.Specs {
+				ts, ok := spec.(*ast.TypeSpec)
+				if !ok || ts.Name.Name != ifaceName {
+					continue
+				}
+				if _, ok := ts.Type.(*ast.InterfaceType); !ok {
+					return nil, fmt.Errorf("%s in package %s is not an interface", ifaceName, pkgDir)
+				}
+				return os.ReadFile(fullPath)
+			}
+		}
+	}
+	return nil, fmt.Errorf("interface %s not found in package directory %s", ifaceName, pkgDir)
+}
+
+// defaultPkgAlias returns the default Go local name for an import path
+// (its last path segment).
+func defaultPkgAlias(path string) string {
+	segments := strings.Split(path, "/")
+	return segments[len(segments)-1]
 }
 
 // generateRegistration creates init() code that registers mock var pointers.

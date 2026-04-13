@@ -37,7 +37,9 @@ jobs:
 
       - name: Run toolexec tests
         run: |
-          go clean -cache
+          # Clean the rewire-test cache explicitly — `go clean -cache`
+          # only wipes $GOCACHE, not our separate rewire-test dir.
+          rm -rf "$HOME/.cache/rewire-test"
           GOFLAGS="-toolexec=rewire" GOCACHE="$HOME/.cache/rewire-test" go test ./example/... -count=1
 
       - name: Verify inlining of rewire wrappers

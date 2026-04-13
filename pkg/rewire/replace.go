@@ -11,9 +11,10 @@ import (
 )
 
 var (
-	registry           sync.Map // func name (string) → mock var pointer (any)
-	realRegistry       sync.Map // func name (string) → real function value (any)
-	byInstanceRegistry sync.Map // func name (string) → *sync.Map (per-method per-instance table)
+	registry            sync.Map // func name (string) → mock var pointer (any)
+	realRegistry        sync.Map // func name (string) → real function value (any)
+	byInstanceRegistry  sync.Map // func name (string) → *sync.Map (per-method per-instance table)
+	mockFactoryRegistry sync.Map // interface name (string) → func() any (mock instance factory)
 )
 
 // Register maps a fully-qualified function name to a pointer to its mock variable.
@@ -43,6 +44,85 @@ func RegisterReal(funcName string, realFn any) {
 // module. Users should not call it directly.
 func RegisterByInstance(funcName string, byInstanceMap *sync.Map) {
 	byInstanceRegistry.Store(funcName, byInstanceMap)
+}
+
+// RegisterMockFactory maps a fully-qualified interface name to a
+// factory that produces a fresh mock instance satisfying it. Called by
+// generated init() code emitted during toolexec compilation for each
+// interface referenced via rewire.NewMock[I]. Users should not call it
+// directly.
+//
+// The factory returns any-typed so the generated file doesn't need to
+// import pkg/rewire with generics in scope; NewMock does the type
+// assertion back to I at the call site.
+func RegisterMockFactory(interfaceName string, factory func() any) {
+	mockFactoryRegistry.Store(interfaceName, factory)
+}
+
+// NewMock returns a fresh mock instance of interface type I. The mock's
+// backing struct is synthesized at compile time by the rewire toolexec
+// wrapper — no go:generate, no committed mock files.
+//
+// Usage:
+//
+//	greeter := rewire.NewMock[bar.GreeterIface](t)
+//	rewire.InstanceMethod(t, greeter, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
+//	    return "mocked: " + name
+//	})
+//	svc := NewService(greeter)
+//
+// The returned value satisfies I and can be passed wherever I is
+// expected. Stub methods via rewire.InstanceMethod using interface
+// method expressions (bar.GreeterIface.Greet) as the target. Unstubbed
+// methods return zero values.
+//
+// Requires -toolexec=rewire. Each test that references NewMock[X] in a
+// test file causes the compiler wrapper to emit a backing struct and
+// factory registration for X. If X isn't actually referenced by
+// NewMock in any test, the factory isn't registered and NewMock fails
+// with a targeted error.
+//
+// Works only for exported interface types. I must be resolvable by
+// reflect.TypeOf and have a non-empty PkgPath.
+func NewMock[I any](t *testing.T) I {
+	t.Helper()
+
+	var zero I
+	typ := reflect.TypeOf(&zero).Elem()
+	if typ == nil {
+		t.Fatal("rewire.NewMock: type parameter I has no runtime type")
+		return zero
+	}
+	if typ.Kind() != reflect.Interface {
+		t.Fatalf("rewire.NewMock: type parameter I must be an interface, got %s (kind %s)", typ, typ.Kind())
+		return zero
+	}
+	if typ.PkgPath() == "" || typ.Name() == "" {
+		t.Fatalf("rewire.NewMock: interface %s has no package path — only named, exported interface types are supported", typ)
+		return zero
+	}
+	key := typ.PkgPath() + "." + typ.Name()
+
+	entry, ok := mockFactoryRegistry.Load(key)
+	if !ok {
+		t.Fatalf("rewire.NewMock: no mock factory registered for %s.\n"+
+			"  NewMock requires the interface to be referenced by a rewire.NewMock[%s] call\n"+
+			"  in a test file so the compiler wrapper can emit a backing struct.\n"+
+			"  Also make sure -toolexec=rewire is active.",
+			key, typ.Name())
+		return zero
+	}
+	factory, ok := entry.(func() any)
+	if !ok {
+		t.Fatalf("rewire: internal error: mock factory for %s has type %T, expected func() any", key, entry)
+		return zero
+	}
+	result, ok := factory().(I)
+	if !ok {
+		t.Fatalf("rewire: internal error: mock factory for %s returned a value that does not satisfy %s", key, typ)
+		return zero
+	}
+	return result
 }
 
 // Func replaces the implementation of original with replacement for the duration

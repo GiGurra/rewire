@@ -38,23 +38,34 @@ type genericInstantiations map[string]map[string][][]string
 // Shape: importPath -> targetName -> true.
 type byInstanceTargets map[string]map[string]bool
 
+// mockedInterfaces lists interface types referenced by rewire.NewMock[I]
+// calls anywhere in the test module. The toolexec codegen emits a
+// backing struct + factory registration for each one at test compile
+// time, eliminating the go:generate / committed-mock-file workflow.
+//
+// Shape: importPath -> interface-type-name -> true.
+type mockedInterfaces map[string]map[string]bool
+
 // scanCache is the on-disk cache format written by loadOrScanMockTargets.
 type scanCache struct {
-	Targets        mockTargets           `json:"targets"`
-	Instantiations genericInstantiations `json:"instantiations"`
-	ByInstance     byInstanceTargets     `json:"byInstance"`
+	Targets          mockTargets           `json:"targets"`
+	Instantiations   genericInstantiations `json:"instantiations"`
+	ByInstance       byInstanceTargets     `json:"byInstance"`
+	MockedInterfaces mockedInterfaces      `json:"mockedInterfaces"`
 }
 
 // loadOrScanMockTargets returns the set of functions that need to be mocked,
-// as declared by rewire.{Func,Real,Restore,InstanceMethod,RestoreInstanceMethod}
+// as declared by rewire.{Func,Real,Restore,InstanceMethod,RestoreInstanceMethod,NewMock}
 // calls in test files across the module, along with the specific
-// type-argument combinations referenced for any generic targets and the
-// subset of targets that need a per-instance dispatch path.
+// type-argument combinations referenced for any generic targets, the
+// subset of targets that need a per-instance dispatch path, and the set
+// of interface types referenced by rewire.NewMock[I] for which the
+// codegen should emit a backing struct.
 //
 // Results are cached per build session (keyed on parent PID). A file lock
 // ensures only one toolexec process scans; others block until the cache
 // is ready.
-func loadOrScanMockTargets(moduleRoot string) (mockTargets, genericInstantiations, byInstanceTargets) {
+func loadOrScanMockTargets(moduleRoot string) (mockTargets, genericInstantiations, byInstanceTargets, mockedInterfaces) {
 	cacheDir := filepath.Join(os.TempDir(), fmt.Sprintf("rewire-%d", os.Getppid()))
 	cacheFile := filepath.Join(cacheDir, "mock_targets.json")
 	lockPath := filepath.Join(cacheDir, "mock_targets.lock")
@@ -73,26 +84,38 @@ func loadOrScanMockTargets(moduleRoot string) (mockTargets, genericInstantiation
 	if data, err := os.ReadFile(cacheFile); err == nil {
 		var cache scanCache
 		if json.Unmarshal(data, &cache) == nil && cache.Targets != nil {
-			return cache.Targets, cache.Instantiations, cache.ByInstance
+			return cache.Targets, cache.Instantiations, cache.ByInstance, cache.MockedInterfaces
 		}
 	}
 
 	// We're the first — scan and write cache
-	targets, insts, byInst := scanAllTestFiles(moduleRoot)
+	targets, insts, byInst, mockedIfaces := scanAllTestFiles(moduleRoot)
 
-	if data, err := json.Marshal(scanCache{Targets: targets, Instantiations: insts, ByInstance: byInst}); err == nil {
+	cache := scanCache{
+		Targets:          targets,
+		Instantiations:   insts,
+		ByInstance:       byInst,
+		MockedInterfaces: mockedIfaces,
+	}
+	if data, err := json.Marshal(cache); err == nil {
 		_ = os.WriteFile(cacheFile, data, 0644)
 	}
 
-	return targets, insts, byInst
+	return targets, insts, byInst, mockedIfaces
 }
 
 // scanAllTestFiles walks the module and finds all rewire.{Func,Real,Restore,
-// InstanceMethod,RestoreInstanceMethod} calls in test files.
-func scanAllTestFiles(moduleRoot string) (mockTargets, genericInstantiations, byInstanceTargets) {
+// InstanceMethod,RestoreInstanceMethod,NewMock} calls in test files.
+//
+// After the walk, interface-typed targets are filtered out of
+// targets/byInstance for the interface's declaring package — those
+// interfaces are mocked via the codegen path, not via rewriter-level
+// method rewriting.
+func scanAllTestFiles(moduleRoot string) (mockTargets, genericInstantiations, byInstanceTargets, mockedInterfaces) {
 	targets := mockTargets{}
 	insts := genericInstantiations{}
 	byInst := byInstanceTargets{}
+	mockedIfaces := mockedInterfaces{}
 
 	_ = filepath.WalkDir(moduleRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
@@ -108,7 +131,7 @@ func scanAllTestFiles(moduleRoot string) (mockTargets, genericInstantiations, by
 			return nil
 		}
 
-		fileTargets, fileInsts, fileByInst := scanFileForMockCalls(path)
+		fileTargets, fileInsts, fileByInst, fileMockedIfaces := scanFileForMockCalls(path)
 		for pkg, funcs := range fileTargets {
 			targets[pkg] = append(targets[pkg], funcs...)
 		}
@@ -128,8 +151,44 @@ func scanAllTestFiles(moduleRoot string) (mockTargets, genericInstantiations, by
 				byInst[pkg][name] = true
 			}
 		}
+		for pkg, ifaces := range fileMockedIfaces {
+			if mockedIfaces[pkg] == nil {
+				mockedIfaces[pkg] = map[string]bool{}
+			}
+			for iface := range ifaces {
+				mockedIfaces[pkg][iface] = true
+			}
+		}
 		return nil
 	})
+
+	// Filter out InstanceMethod / RestoreInstanceMethod targets whose
+	// receiver type is a mocked interface. Those targets don't get
+	// rewritten in the interface's declaring package — the per-instance
+	// dispatch table is emitted into the test package instead, by the
+	// mock struct codegen.
+	for pkg, ifaces := range mockedIfaces {
+		if _, ok := targets[pkg]; !ok {
+			continue
+		}
+		filteredTargets := targets[pkg][:0]
+		for _, name := range targets[pkg] {
+			typeName, _, isMethod := parseTargetName(name)
+			if isMethod && ifaces[typeName] {
+				continue // skip — handled by codegen
+			}
+			filteredTargets = append(filteredTargets, name)
+		}
+		targets[pkg] = filteredTargets
+		if byInst[pkg] != nil {
+			for name := range byInst[pkg] {
+				typeName, _, isMethod := parseTargetName(name)
+				if isMethod && ifaces[typeName] {
+					delete(byInst[pkg], name)
+				}
+			}
+		}
+	}
 
 	for pkg, funcs := range targets {
 		targets[pkg] = dedupe(funcs)
@@ -140,7 +199,7 @@ func scanAllTestFiles(moduleRoot string) (mockTargets, genericInstantiations, by
 		}
 	}
 
-	return targets, insts, byInst
+	return targets, insts, byInst, mockedIfaces
 }
 
 func dedupeTypeArgs(combos [][]string) [][]string {
@@ -158,14 +217,14 @@ func dedupeTypeArgs(combos [][]string) [][]string {
 }
 
 // scanFileForMockCalls parses a test file and returns all rewire target
-// references, any generic type-argument combinations, and the subset of
-// targets that need a per-instance dispatch path (those referenced by
-// InstanceMethod / RestoreInstanceMethod).
-func scanFileForMockCalls(path string) (mockTargets, genericInstantiations, byInstanceTargets) {
+// references, any generic type-argument combinations, the subset of
+// targets that need a per-instance dispatch path, and the set of
+// interface types referenced by rewire.NewMock[I].
+func scanFileForMockCalls(path string) (mockTargets, genericInstantiations, byInstanceTargets, mockedInterfaces) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, path, nil, 0)
 	if err != nil {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	// Build import map: local name → import path
@@ -187,11 +246,11 @@ func scanFileForMockCalls(path string) (mockTargets, genericInstantiations, byIn
 	}
 
 	if rewireLocalName == "" {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	// Walk AST looking for rewire.{Func,Real,Restore,InstanceMethod,
-	// RestoreInstanceMethod} calls.
+	// RestoreInstanceMethod,NewMock} calls.
 	//
 	// Func/Real/Restore take the target function as their second argument
 	// (index 1), after t.
@@ -199,13 +258,42 @@ func scanFileForMockCalls(path string) (mockTargets, genericInstantiations, byIn
 	// InstanceMethod/RestoreInstanceMethod take an instance as their second
 	// argument (index 1) and the target as their third (index 2) — and they
 	// additionally flag the target as needing per-instance emission.
+	//
+	// NewMock[I](...) takes its type argument as an IndexExpr wrapping
+	// the rewire.NewMock selector — no positional target argument.
 	targets := mockTargets{}
 	insts := genericInstantiations{}
 	byInst := byInstanceTargets{}
+	mockedIfaces := mockedInterfaces{}
 	ast.Inspect(f, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
+		}
+
+		// rewire.NewMock[I] is an IndexExpr (or IndexListExpr for
+		// multi-type-param generic interfaces in a future phase),
+		// wrapping rewire.NewMock and carrying I as its index.
+		if inner, idxArgs := stripTypeArgs(call.Fun, fset); len(idxArgs) > 0 {
+			if sel, ok := inner.(*ast.SelectorExpr); ok {
+				if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == rewireLocalName && sel.Sel.Name == "NewMock" {
+					// Re-parse the type argument as a selector expression
+					// (pkg.Iface) since stripTypeArgs returned it as a string.
+					// Walk the IndexExpr's Index directly to get the AST.
+					switch idx := call.Fun.(type) {
+					case *ast.IndexExpr:
+						if importPath, typeName := extractInterfaceRef(idx.Index, imports); importPath != "" {
+							if mockedIfaces[importPath] == nil {
+								mockedIfaces[importPath] = map[string]bool{}
+							}
+							mockedIfaces[importPath][typeName] = true
+						}
+					case *ast.IndexListExpr:
+						// Future: generic interfaces. For now ignore.
+					}
+					return true
+				}
+			}
 		}
 
 		sel, ok := call.Fun.(*ast.SelectorExpr)
@@ -256,7 +344,27 @@ func scanFileForMockCalls(path string) (mockTargets, genericInstantiations, byIn
 		return true
 	})
 
-	return targets, insts, byInst
+	return targets, insts, byInst, mockedIfaces
+}
+
+// extractInterfaceRef resolves an expression like `bar.GreeterIface`
+// used as a type argument to rewire.NewMock into (importPath,
+// typeName). Returns ("","") if the expression isn't a recognized
+// package-qualified identifier.
+func extractInterfaceRef(expr ast.Expr, imports map[string]string) (string, string) {
+	sel, ok := expr.(*ast.SelectorExpr)
+	if !ok {
+		return "", ""
+	}
+	pkgIdent, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return "", ""
+	}
+	importPath, ok := imports[pkgIdent.Name]
+	if !ok {
+		return "", ""
+	}
+	return importPath, sel.Sel.Name
 }
 
 func exprSource(expr ast.Expr, fset *token.FileSet) string {

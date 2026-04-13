@@ -11,7 +11,7 @@ A complete mocking solution for Go:
 - **Replace any function or method at test time** — package-level functions, struct methods, stdlib, third-party. No interfaces, no dependency injection, no unsafe runtime patches. This is what other mocking libraries can't do.
 - **Generate mock structs for interfaces** — for traditional dependency-injection style testing, like other Go mocking libraries.
 
-One tool, both approaches. Production code on disk is never modified — for function/method mocking, rewire intercepts the Go compiler via `-toolexec` and rewrites only the specific functions you mock, entirely in-memory during compilation. Interface mocks are generated into test files.
+One tool, both approaches. Production code on disk is never modified — rewire intercepts the Go compiler via `-toolexec` and emits what's needed only in-memory during compilation. This covers function/method mocking (rewritten wrappers around the targeted functions) and, as of Phase 1, interface mocks via `rewire.NewMock[T]` — no `go:generate`, no committed mock files. An older CLI mock generator is still available for users who prefer committed mock source.
 
 ## Quick start
 
@@ -145,63 +145,33 @@ Requires `GOFLAGS="-toolexec=rewire"` to be set (see [Setup](#recommended-test-s
 </details>
 
 <details>
-<summary><strong>Interface mock generation</strong> — generate mock structs for dependency injection</summary>
+<summary><strong>Interface mocks</strong> — `rewire.NewMock[T]` (no go:generate, no committed files)</summary>
 
-For interfaces you pass in, rewire generates lightweight mock structs:
-
-```bash
-rewire mock -f bar.go -i Store -p foo -o mock_store_test.go
-```
-
-This generates a struct with function fields for each method:
+Rewire ships two styles of interface mocking. The newer one — `rewire.NewMock[T]` — synthesizes the backing struct at compile time via toolexec. **No `go:generate`, no committed mock files.** Just reference the interface in a test and it works:
 
 ```go
-type MockStore struct {
-    GetFunc    func(key string) (string, error)
-    SetFunc    func(key string, value string) error
-    DeleteFunc func(key string) error
-}
+func TestService_GreetingFlow(t *testing.T) {
+    greeter := rewire.NewMock[bar.GreeterIface](t)
 
-func (m *MockStore) Get(key string) (_r0 string, _r1 error) {
-    if m.GetFunc != nil {
-        return m.GetFunc(key)
-    }
-    return // zero values
-}
-// ...
-```
+    rewire.InstanceMethod(t, greeter, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
+        return "mocked: " + name
+    })
 
-Use in tests:
-
-```go
-func TestGetOrDefault(t *testing.T) {
-    mock := &MockStore{
-        GetFunc: func(key string) (string, error) {
-            return "value", nil
-        },
-    }
-    got := GetOrDefault(mock, "key", "default")
-    // got == "value"
+    svc := NewService(greeter)
+    got := svc.HelloFlow("Alice")
+    // ...
 }
 ```
 
-### go:generate workflow
+Two mocks of the same interface are scoped independently — stubs on one don't leak to the other. Unstubbed methods return zero values. `rewire.Restore(t, mock)` clears every stub on a mock.
 
-Add directives to your test files and regenerate with `go generate`:
+The toolexec wrapper scans test files for `rewire.NewMock[X]` references, parses the interface's source, and emits a backing struct into the test package's compile args. You never see the generated code and never commit it — it's the same mechanism rewire uses to emit method-mock wrappers and per-instance dispatch tables.
 
-```go
-//go:generate rewire mock -f ../bar/interfaces.go -i Store -p foo -o mock_store_test.go
-//go:generate rewire mock -f ../bar/interfaces.go -i Logger -p foo -o mock_logger_test.go
-```
+**Current scope (Phase 1):** non-generic interfaces, methods using builtin or already-qualified types. Embedded interfaces, types from the interface's own declaring package, and generic interfaces are Phase 2+ items (rejected with a clear error for now).
 
-```bash
-go generate ./...   # regenerate mocks
-go test ./...       # run tests
-```
+See [Interface Mocks](docs/interface-mocks.md) for the full feature set and the older `rewire mock` CLI.
 
-Handles imported types (`context.Context`, `*http.Request`, `io.Reader`, etc.), variadic parameters, unnamed parameters, and multiple return values.
-
-Does **not** require toolexec — this is standard code generation.
+> **Note on the older CLI.** Rewire also supports a traditional `rewire mock` CLI, typically invoked via `go:generate`, that produces a committed `mock_*_test.go` file. It's still fully supported, but once the `rewire.NewMock[T]` path reaches feature parity (embedded interfaces, same-package types, generics) rewire's own CLI generator is a candidate for deprecation. This is purely about rewire's internal surface area — it's not a statement about the `go:generate` ecosystem in general.
 
 </details>
 
