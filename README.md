@@ -284,7 +284,6 @@ These limitations apply to compile-time function/method mocking only, not interf
 - **Compiler intrinsics** — functions like `math.Abs`, `math.Sqrt`, `math.Floor` are replaced with CPU instructions by the compiler. Rewire detects these and fails with a clear error. Use non-intrinsic alternatives (e.g., `math.Pow` works fine).
 - **No parallel mock safety** — parallel tests in the same package should not mock the same function with different replacements. The mock variable is shared across parallel goroutines.
 - **Bodyless functions** — functions implemented in assembly (no Go body) cannot be rewritten.
-- **Method-level type parameters** — Go 1.18+ doesn't allow methods to declare their own type parameters beyond the receiver's, so this isn't really a rewire limitation, but for completeness: methods on generic types work, hypothetical method-level type params don't.
 
 </details>
 
