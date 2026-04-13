@@ -37,11 +37,37 @@ The mock is automatically restored after the test via `t.Cleanup`.
 
 ## Mocking your own code
 
-The same API works on functions in your own module:
+The same API works on functions in your own module. Production code:
 
 ```go
+// example/bar/bar.go
+package bar
+
+func Greet(name string) string {
+    return "Hello, " + name + "!"
+}
+```
+
+```go
+// example/foo/foo.go
+package foo
+
+import "example/bar"
+
+func Welcome(name string) string {
+    return "Welcome! " + bar.Greet(name)
+}
+```
+
+Test:
+
+```go
+// example/foo/foo_test.go
+package foo
+
 import (
     "testing"
+
     "example/bar"
     "github.com/GiGurra/rewire/pkg/rewire"
 )
@@ -52,13 +78,20 @@ func TestWelcome_WithMock(t *testing.T) {
     })
 
     got := Welcome("Alice")
-    // Welcome internally calls bar.Greet, which now returns "Howdy, Alice"
+    want := "Welcome! Howdy, Alice"
+    if got != want {
+        t.Errorf("got %q, want %q", got, want)
+    }
 }
 
 func TestWelcome_Real(t *testing.T) {
-    // bar.Greet uses the real implementation — mocks are per-test
+    // No mock here — bar.Greet runs its real body, so:
+    //   Welcome("Bob") → "Welcome! Hello, Bob!"
+    // Mocks are per-test; the previous TestWelcome_WithMock does not leak.
 }
 ```
+
+`Welcome` never changes, and `bar.Greet` never changes on disk. At compile time rewire rewrites `bar.Greet` so it checks a package-level mock variable first — when the mock is set, `Welcome` transparently sees the replacement instead.
 
 ## Spying: delegating to the real implementation
 

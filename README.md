@@ -69,6 +69,17 @@ func Greet(name string) string {
 ```
 
 ```go
+// foo/foo.go — never modified
+package foo
+
+import "example/bar"
+
+func Welcome(name string) string {
+    return "Welcome! " + bar.Greet(name)
+}
+```
+
+```go
 // foo/foo_test.go
 func TestWelcome_WithMock(t *testing.T) {
     rewire.Func(t, bar.Greet, func(name string) string {
@@ -76,11 +87,13 @@ func TestWelcome_WithMock(t *testing.T) {
     })
 
     got := Welcome("Alice")
-    // Welcome internally calls bar.Greet, which now returns "Howdy, Alice"
+    // got == "Welcome! Howdy, Alice"
+    // Welcome still calls bar.Greet as normal — but bar.Greet now runs the mock.
 }
 
 func TestWelcome_Real(t *testing.T) {
-    // bar.Greet uses the real implementation here — mocks are per-test
+    // No mock here. Welcome("Bob") == "Welcome! Hello, Bob!"
+    // Mocks are per-test; the previous test does not leak.
 }
 ```
 
