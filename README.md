@@ -30,20 +30,6 @@ e.OnAny().Returns("hi other")
 
 One package, one API surface. Every scenario above uses the same underlying mechanism: **rewire intercepts the Go compiler via `-toolexec` and rewrites or synthesizes code in-memory during compilation.** Your source on disk is never modified. Nothing is patched at runtime. No `unsafe`, no platform-specific code, no inline-breaking tricks.
 
-## Why this combination is unusual
-
-Go has plenty of mocking libraries, but each one has historically picked *one* spot on this grid and stayed there:
-
-| Capability | Typical Go approach | rewire |
-|---|---|---|
-| Mock a stdlib or third-party function | Runtime binary patching (unsafe, platform-specific, breaks under inlining) | Compile-time rewrite (safe, portable, verified compatible with inlining) |
-| Mock a struct method without touching production code | Extract an interface + dependency injection | Method expression — no interface, no DI |
-| Mock *one specific instance* of a type | Extract an interface, inject per instance | `rewire.InstanceMethod` — scoped by receiver pointer |
-| Mock an interface | `go:generate` a mock file, commit it, regenerate on every change | `rewire.NewMock[T]` — backing struct synthesized at compile time, nothing committed |
-| Multi-pattern expectations with call-count verification | A separate DSL tied to one of the above styles | `expect.For` / `expect.ForInstance` — the same DSL works on *all* of the above |
-
-Each cell of rewire's column uses the same compile-time rewriting machinery underneath, so they compose. You can mix global mocks, per-instance mocks, and interface mocks in a single test, all with the same verbs.
-
 The inspiration is Erlang's [meck](https://github.com/eproxus/meck) — where you can replace any function in any module without touching its definition. Rewire gets to the same destination via the Go compiler's `-toolexec` hook instead of runtime hot-patching.
 
 ## Quick start
@@ -216,6 +202,25 @@ e.OnAny().Returns("hi other")
 One rule-builder API — `.On` / `.Match` / `.OnAny` / `.Returns` / `.DoFunc` / `.Times` / `.AtLeast` / `.Never` / `.Maybe` / `.Wait` — spans free functions, concrete methods (global), concrete methods (per-instance), and interface methods on `NewMock` instances.
 
 See [Expectation DSL](docs/expectations.md) for the full reference.
+
+</details>
+
+<details>
+<summary><strong>Why these capabilities might be unusual</strong></summary>
+
+Go has plenty of mocking libraries, but most of them pick *one* spot on this grid and stay there. The combination rewire covers is unusual — possibly novel, depending on how you count. Here's a calibrated comparison without naming specific libraries:
+
+| Capability | Typical Go approach | rewire |
+|---|---|---|
+| Mock a stdlib or third-party function | Runtime binary patching (unsafe, platform-specific, breaks under inlining) | Compile-time rewrite (safe, portable, verified compatible with inlining) |
+| Mock a struct method without touching production code | Extract an interface + dependency injection | Method expression — no interface, no DI |
+| Mock *one specific instance* of a type | Extract an interface, inject per instance | `rewire.InstanceMethod` — scoped by receiver pointer |
+| Mock an interface | `go:generate` a mock file, commit it, regenerate on every change | `rewire.NewMock[T]` — backing struct synthesized at compile time, nothing committed |
+| Multi-pattern expectations with call-count verification | A separate DSL tied to one of the above styles | `expect.For` / `expect.ForInstance` — the same DSL works on *all* of the above |
+
+Each cell of rewire's column uses the same compile-time rewriting machinery underneath, so they compose. You can mix global mocks, per-instance mocks, and interface mocks in a single test, all with the same verbs.
+
+"Might be" rather than "is" because the Go ecosystem is large and we haven't done a systematic survey — if a library already covers this combination and we missed it, please open an issue and tell us about it.
 
 </details>
 
