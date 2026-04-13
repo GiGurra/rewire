@@ -174,15 +174,31 @@ Within a test package, `rewire.Func` uses `t.Cleanup` to restore the mock variab
 
 ## Interface mock generation
 
-In addition to compile-time function rewriting, rewire also generates mock structs for Go interfaces via `rewire mock`. This is standard code generation (not toolexec) — the generated files are committed to the repo and work with `go:generate`.
+Rewire offers two styles of interface mocking. Both exist because they hit different sweet spots.
 
-This covers the "dependency injection" side of mocking: when you have an interface and want to pass in a mock implementation. Combined with `rewire.Func` for compile-time function/method replacement, rewire is a complete mocking solution — no need for a second mocking library.
+### `rewire.NewMock[T]` — toolexec-driven synthesis (recommended)
 
-### Design choices
+The newer approach: the scanner detects `rewire.NewMock[X]` references in test files, the codegen locates `X`'s source at compile time, and a concrete backing struct is synthesized into the test package's compile args — never written to disk, never committed.
 
-- **Codegen over toolexec**: Interface mocks are generated files, not compile-time artifacts. This gives full IDE support (gopls sees the types), reviewable diffs, and follows standard Go patterns (`go:generate`).
-- **Function fields**: Each method becomes a function field (`GetFunc`, `SetFunc`). Unset fields return zero values via named return parameters and bare `return`.
-- **Only direct methods**: Embedded interfaces are not resolved — only methods directly declared on the interface are generated. This keeps the generator simple and avoids cross-package type resolution.
+Design choices specific to this path:
+
+- **No committed mock files.** Users reference the interface in a test; rewire handles the rest. Trade-off: gopls can't see the generated struct, so users never name it directly. The API is designed around that (`rewire.NewMock[I]` for creation, interface method expressions like `I.M` for stubbing), and in practice the generated type is invisible.
+- **Same dispatch as per-instance method mocks.** Each generated method body consults a per-method `_ByInstance sync.Map` and falls back to zero-value returns. The sync.Map is populated by `rewire.InstanceMethod(t, mock, I.Method, replacement)` — one stubbing verb across concrete per-instance mocks and interface-method mocks.
+- **Factory registry.** The generated file's `init()` registers a `func() any` factory keyed on the interface's fully-qualified name. `rewire.NewMock[I](t)` looks up the factory by `reflect.TypeOf[I]().String()`-equivalent, calls it, and type-asserts back to `I`. Non-reflective at the hot path — factory lookup is O(1), struct construction is a plain `new`.
+- **Non-zero-size backing struct.** Go's spec explicitly permits pointers to distinct zero-size variables to compare equal, which would break per-instance dispatch since the sync.Map keys on receiver pointer identity. The generator emits `struct{ _ [1]byte }` to force distinct allocations to get distinct addresses. Load-bearing, documented in the generator source.
+- **Phase 1 scope.** Non-generic interfaces, methods using builtin or already-qualified types in their signatures. Embedded interfaces, types from the interface's own declaring package, and generic interfaces are separate plan files (`plans/TODO_toolexec_interface_mocks_phase2.md`, Phase 3 is mentioned but not yet spec'd).
+
+### `rewire mock` CLI — committed codegen (legacy, still supported)
+
+The original approach: a standalone CLI that reads an interface's source and writes a committed `mock_*_test.go` file with function fields per method. Typically invoked via `go:generate`.
+
+Design choices specific to this path:
+
+- **Codegen over toolexec.** Generated files are committed, reviewable, and fully visible to `gopls`. Trade-off: users have to remember to regenerate when interfaces change.
+- **Function fields.** Each method becomes a `XFunc func(...)` field on the mock struct. Unset fields return zero values via named return parameters and bare `return`.
+- **Only direct methods.** Embedded interfaces are not resolved — only methods directly declared on the interface are generated. Same limitation as Phase 1 of the toolexec path, and a carryover from when this was rewire's only interface-mocking API.
+
+This path is a candidate for deprecation inside rewire once the toolexec `NewMock[T]` path reaches feature parity (embedded interfaces, same-package types, generic interfaces). The two styles coexist today.
 
 ## Implemented features
 
@@ -194,14 +210,26 @@ Method mocks set via `rewire.Func` are global — all instances of the type shar
 
 ## Future work
 
-### gopls integration via -overlay
+### gopls integration via `-overlay`
 
-Generate an overlay JSON file mapping source files to rewritten versions. `gopls` would see mock variables and provide autocomplete. A `rewire daemon` could keep the overlay in sync.
+Generate an overlay JSON file mapping source files to rewritten versions. `gopls` would see mock variables (`Mock_Greet`, `Real_Greet`) and provide autocomplete inside test code. A `rewire daemon` could keep the overlay in sync. Not started — the current experience (gopls resolves `rewire.Func(t, bar.Greet, ...)` as an ordinary function call, so no IDE friction on the happy path) has been good enough so far.
 
-### Generic function support
+### Interface mock Phase 2
 
-Generic functions need mock variables with matching type parameters.
+See `plans/TODO_toolexec_interface_mocks_phase2.md`. Three milestones:
+
+- **Same-package type qualification** — so an interface in `bar/` can safely expose `*bar.Greeter` in a method signature. Requires the generator to qualify bare identifiers that name types declared in the interface's own package.
+- **Embedded interfaces** — `io.ReadCloser`-style composition. Requires transitive method-set resolution across package boundaries.
+- **Module-aware package resolution** — respect `replace` directives, workspace files, and vendor directories via `go list` rather than the current `go/build.Import` approach.
+
+### Generic interfaces
+
+`rewire.NewMock[Store[int]]` with per-instantiation dispatch. Reuses the same sync.Map keying pattern that already works for generic method rewriting. Phase 3 in the same plan doc.
+
+### API consolidation and rename pass
+
+Once the full feature scope has settled, a coherent cleanup of the public API surface — collapsing `Func` / `InstanceMethod` / `Restore`'s overloaded semantics into a more uniform verb set, rethinking whether the `expect` package splits into `For` / `ForInstance` or unifies under an options pattern. Deliberately deferred to avoid piecemeal renames. See `plans/TODO_rename_refactor_once_done.md`.
 
 ### Parallel test safety
 
-Parallel tests that mock the same function race on the mock variable. Options: goroutine-local storage (not native in Go), per-test context threading, or documenting the limitation.
+Parallel tests that mock the same function race on the shared `Mock_` variable. Options considered: goroutine-local storage (not native in Go), per-test context threading (intrusive), or continuing to document the limitation. Not currently planned — most users hit this only when trying to shove two instance-scoped mocks into parallel tests, and those cases are already handled by `rewire.InstanceMethod` + per-receiver keying.

@@ -84,6 +84,87 @@ func (s *Server) _real_Server_Handle(req string) string {
 
 The `Real_Server_Handle` alias is a method expression of type `func(*Server, string) string`, so a spy can call it as `real(server, req)`.
 
+## Per-instance method dispatch
+
+When the scanner sees at least one `rewire.InstanceMethod(t, instance, target, ...)` or `rewire.RestoreInstanceMethod(...)` call referencing a pointer-receiver method, the rewriter emits an additional dispatch path on top of the shape above. A per-method `sync.Map` is added, keyed on the receiver pointer, and the wrapper body consults it before the global mock:
+
+```go
+// Rewritten (in-memory) when rewire.InstanceMethod targets (*Server).Handle
+var Mock_Server_Handle            func(*Server, string) string
+var Mock_Server_Handle_ByInstance sync.Map  // new — only emitted if InstanceMethod is used
+
+func (s *Server) Handle(req string) string {
+    // 1. Per-instance lookup — keyed on the receiver pointer.
+    if raw, ok := Mock_Server_Handle_ByInstance.Load(s); ok {
+        if fn, ok := raw.(func(*Server, string) string); ok {
+            return fn(s, req)
+        }
+    }
+    // 2. Global mock fallthrough — existing behavior.
+    if _rewire_mock := Mock_Server_Handle; _rewire_mock != nil {
+        return _rewire_mock(s, req)
+    }
+    // 3. Real implementation.
+    return s._real_Server_Handle(req)
+}
+```
+
+Dispatch order is **per-instance → global → real**, so `rewire.InstanceMethod` overrides `rewire.Func` for the specific receiver while other instances still see the global mock (or the real body).
+
+**Emission is opt-in.** Tests that only use `rewire.Func` on methods don't get the `_ByInstance` sync.Map or the extra lookup — the scanner gates emission on whether any test in the module references the method via `InstanceMethod` / `RestoreInstanceMethod`. Zero per-call overhead for tests that don't need per-instance scoping.
+
+**`rewire.Restore` is overloaded** to match. Passing a function target clears the global mock (existing behavior); passing an instance value walks every registered `_ByInstance` sync.Map and deletes entries keyed on that instance, clearing all per-instance mocks bound to the receiver in one call.
+
+**`any(instance)` as the key.** `rewire.InstanceMethod` stores the receiver as `any(instance)` so interface equality compares both dynamic type and pointer value. This matters for generic methods: `*Container[int]` and `*Container[string]` keys never collide even at the same address.
+
+## Interface mocks via `rewire.NewMock[T]`
+
+For interface mocks, there's no production body to rewrite — the interface has no implementation. Instead, rewire synthesizes a concrete backing struct into the test package at compile time.
+
+1. **Scanner** — walks `_test.go` files and collects every `rewire.NewMock[X]` reference. Each one names an interface type that needs a backing struct.
+2. **Interface resolution** — for each mocked interface, locate its declaring package via `go/build`, parse its source, extract the method set.
+3. **Struct synthesis** — emit a concrete struct type that satisfies the interface. Each method body consults a per-method `_ByInstance sync.Map` (the same mechanism as per-instance method mocks) and falls back to zero-value returns when nothing is stubbed.
+4. **Factory + registry** — the synthesized file includes an `init()` that registers (a) a factory function mapping the interface's fully-qualified name to a constructor, and (b) every per-method `_ByInstance` table with `rewire.RegisterByInstance`.
+5. **Injection** — the generated file is written to a temp path and appended to the compiler's argument list. It's a real `*_test.go` file from the compiler's perspective, but it only exists for the duration of the compile.
+
+Concretely, `rewire.NewMock[bar.GreeterIface](t)` produces code like:
+
+```go
+// Synthesized at compile time, never written to disk:
+type _rewire_mock_bar_GreeterIface struct{ _ [1]byte }
+
+var Mock__rewire_mock_bar_GreeterIface_Greet_ByInstance sync.Map
+
+func (m *_rewire_mock_bar_GreeterIface) Greet(name string) (_r0 string) {
+    if raw, ok := Mock__rewire_mock_bar_GreeterIface_Greet_ByInstance.Load(m); ok {
+        if fn, ok := raw.(func(bar.GreeterIface, string) string); ok {
+            return fn(m, name)
+        }
+    }
+    return // zero value
+}
+
+func init() {
+    rewire.RegisterMockFactory("github.com/example/bar.GreeterIface", func() any {
+        return &_rewire_mock_bar_GreeterIface{}
+    })
+    rewire.RegisterByInstance(
+        "github.com/example/bar.GreeterIface.Greet",
+        &Mock__rewire_mock_bar_GreeterIface_Greet_ByInstance,
+    )
+}
+```
+
+At test time:
+
+- `rewire.NewMock[bar.GreeterIface](t)` looks up the factory by the interface's full name and returns `factory()` type-asserted back to `bar.GreeterIface`.
+- `rewire.InstanceMethod(t, mock, bar.GreeterIface.Greet, replacement)` resolves `bar.GreeterIface.Greet` via `runtime.FuncForPC` — which does return a stable, parseable name for interface method expressions — and stores the replacement in the registered `_ByInstance` sync.Map.
+- The backing struct's method body loads from the same sync.Map on every call, so stubs set via `InstanceMethod` route correctly and unstubbed methods return zero values.
+
+**The `[1]byte` padding field is load-bearing.** Go's spec explicitly allows pointers to distinct zero-size variables to compare equal, which means two `&emptyStruct{}` allocations may share an address and collide in the per-instance sync.Map. A one-byte padding field forces distinct allocations to get distinct addresses.
+
+**Receiver type bridging.** The stored replacement has signature `func(bar.GreeterIface, string) string` — the user passes a function of the interface method expression's type. When the generated method assembles its type assertion, it uses exactly that type, and calls `fn(m, name)` where `m` is the concrete backing struct pointer. Go's implicit assignability rule converts `m` to `bar.GreeterIface` at the call site.
+
 ## Build cache
 
 Go's build cache keys on compilation inputs including the toolexec binary. The recommended setup uses a separate cache for tests:

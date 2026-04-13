@@ -64,3 +64,11 @@ go clean -cache
 ```
 
 This only needs to happen once. After that, Go's build cache handles incremental rebuilds correctly.
+
+**If you're using a separate test cache** (recommended above), `go clean -cache` wipes whichever cache `$GOCACHE` currently points at — which is *not* your test cache unless you set it explicitly:
+
+```bash
+GOCACHE="$HOME/.cache/rewire-test" go clean -cache
+```
+
+Worth knowing if you ever find yourself chasing stale test results after editing the rewire source or changing versions.

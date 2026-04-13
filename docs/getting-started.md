@@ -55,58 +55,82 @@ That's it. `bar.Greet` is replaced for the duration of `TestWelcome_WithMock` an
 
 See [Setup](setup.md) for IDE configuration (GoLand, VS Code) and recommended cache strategies.
 
-## Interface mock generation (quick start)
+## Method mocking (quick start)
 
-### 1. Generate a mock
-
-Given an interface in `bar/interfaces.go`:
+Method mocks work exactly like function mocks — pass a Go method expression as the target:
 
 ```go
-type Store interface {
-    Get(key string) (string, error)
-    Set(key string, value string) error
+func TestGreetWith_MockedMethod(t *testing.T) {
+    rewire.Func(t, (*bar.Greeter).Greet, func(g *bar.Greeter, name string) string {
+        return "Mocked, " + name
+    })
+
+    g := &bar.Greeter{Prefix: "Hi"}
+    // GreetWith now sees the mocked method on every *bar.Greeter instance.
 }
 ```
 
-Generate a mock:
+Both pointer (`(*Type).Method`) and value (`Type.Method`) receivers work. The replacement function takes the receiver as its first parameter.
 
-```bash
-rewire mock -f bar/interfaces.go -i Store -p foo -o mock_store_test.go
-```
-
-### 2. Use it in tests
+For **per-instance** scoping — mock one specific receiver while other instances run the real method body — use `rewire.InstanceMethod`:
 
 ```go
-func TestGetOrDefault(t *testing.T) {
-    mock := &MockStore{
-        GetFunc: func(key string) (string, error) {
-            return "value", nil
-        },
-    }
-    got := GetOrDefault(mock, "key", "default")
-    // got == "value"
+s1 := &bar.Server{Name: "primary"}
+s2 := &bar.Server{Name: "secondary"}
+
+rewire.InstanceMethod(t, s1, (*bar.Server).Handle, func(s *bar.Server, req string) string {
+    return "primary-mock: " + req
+})
+
+s1.Handle("ping") // "primary-mock: ping"
+s2.Handle("ping") // real Handle body
+```
+
+See [Method Mocking](method-mocking.md) for global and per-instance details including generic methods.
+
+## Interface mocking (quick start)
+
+Rewire synthesizes the backing struct for an interface at compile time. No `go:generate` step, no committed mock files — just reference the interface in a test:
+
+```go
+func TestService_GreetingFlow(t *testing.T) {
+    greeter := rewire.NewMock[bar.GreeterIface](t)
+
+    rewire.InstanceMethod(t, greeter, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
+        return "mocked: " + name
+    })
+
+    svc := NewService(greeter)
+    got := svc.HelloFlow("Alice")
+    // ...
 }
 ```
 
-No toolexec needed for interface mocks — they're plain Go structs.
+The toolexec wrapper scans test files for `rewire.NewMock[X]` references, parses the interface's source, and emits a concrete backing struct into the test package's compile args. You don't see the generated code, don't commit it, and don't regenerate it when the interface changes.
 
-### 3. Automate with go:generate
+Two mocks of the same interface are scoped independently via the same per-instance dispatch that backs `rewire.InstanceMethod`. Unstubbed methods return zero values. `rewire.Restore(t, mock)` clears every stub bound to a mock.
 
-Add directives to your test file:
+Rewire also ships an older `rewire mock` CLI (usually invoked via `go:generate`) that produces a committed mock file — useful when you want to review the generated code. See [Interface Mocks](interface-mocks.md) for both styles and the `NewMock[T]` vs CLI trade-offs.
+
+## Expectation DSL (optional)
+
+For tests that need multi-pattern stubs, argument predicates, call-count verification, or async synchronization, the `expect` package layers a fluent DSL on top of any rewire mock:
 
 ```go
-//go:generate rewire mock -f ../bar/interfaces.go -i Store -p foo -o mock_store_test.go
+import "github.com/GiGurra/rewire/pkg/rewire/expect"
+
+e := expect.For(t, bar.Greet)
+e.On("Alice").Returns("hi Alice")
+e.Match(func(name string) bool { return strings.HasPrefix(name, "admin_") }).Returns("admin")
+e.OnAny().Returns("hi other")
 ```
 
-Then regenerate anytime interfaces change:
-
-```bash
-go generate ./...
-```
+Use `expect.ForInstance(t, mock, target)` to get the same DSL for per-instance method mocks and interface methods on `NewMock` instances. See [Expectations DSL](expectations.md).
 
 ## Next steps
 
 - [Function Mocking](function-mocking.md) — detailed guide with examples
-- [Method Mocking](method-mocking.md) — mock struct methods
-- [Interface Mocks](interface-mocks.md) — full mock generation guide
+- [Method Mocking](method-mocking.md) — global + per-instance method mocks
+- [Interface Mocks](interface-mocks.md) — `NewMock[T]` and the older `rewire mock` CLI
+- [Expectations DSL](expectations.md) — `.On` / `.Match` / `.OnAny` / `.Returns` / `.Times` and friends
 - [Setup](setup.md) — IDE and terminal configuration
