@@ -48,6 +48,27 @@ g2.Greet("Bob")   // also "mocked"
 
 This is consistent with how function mocking works — the mock variable is package-level. For per-instance behavior, use [interface mocks](interface-mocks.md) instead.
 
+## Method expressions vs. method values
+
+Rewire requires you to pass a Go **method expression** (`(*Type).Method` or `Type.Method`), not a **method value** (`instance.Method` bound to a specific receiver):
+
+```go
+g := &bar.Greeter{Prefix: "Hi"}
+
+// ❌ Method value — bound to g. Rejected with a diagnostic.
+rewire.Func(t, g.Greet, replacement)
+
+// ✅ Method expression — unbound, receiver is first parameter.
+rewire.Func(t, (*bar.Greeter).Greet, replacement)
+```
+
+Two reasons for the restriction:
+
+1. **Semantic clarity.** Method mocks are global — they apply to every instance of the type. Passing `g.Greet` suggests "mock only this instance", which isn't what actually happens. The method-expression form makes the global scope visible in the code.
+2. **Runtime identity.** `runtime.FuncForPC` reports method values with a `-fm` suffix (e.g., `bar.(*Greeter).Greet-fm`) because Go wraps them in a thunk that binds the receiver. That wrapper is not the function rewire rewrote, so the mock variable lookup would fail anyway.
+
+If you accidentally pass a method value, rewire detects it and fails the test with a targeted error pointing to the method-expression form you should use instead.
+
 ## Closure capture
 
 Just like function mocks, method replacements are closures:

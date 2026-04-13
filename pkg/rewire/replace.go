@@ -1,6 +1,7 @@
 package rewire
 
 import (
+	"fmt"
 	"os"
 	"reflect"
 	"runtime"
@@ -30,7 +31,46 @@ func Register(funcName string, mockVarPtr any) {
 func Func[F any](t *testing.T, original F, replacement F) {
 	t.Helper()
 
+	elemVal := resolveMockVar(t, original)
+
+	// Save current value (may be nil)
+	oldVal := reflect.New(elemVal.Type()).Elem()
+	oldVal.Set(elemVal)
+
+	// Set replacement
+	elemVal.Set(reflect.ValueOf(replacement))
+
+	t.Cleanup(func() {
+		elemVal.Set(oldVal)
+	})
+}
+
+// Restore clears any active mock for original, so subsequent calls in the
+// same test use the real implementation. Restore is optional — the test's
+// automatic cleanup already restores mocks at test end — but it lets you
+// end a mock mid-test.
+//
+// Restore is idempotent and safe to call any number of times. The automatic
+// cleanup installed by Func still runs correctly afterwards.
+func Restore[F any](t *testing.T, original F) {
+	t.Helper()
+
+	elemVal := resolveMockVar(t, original)
+	elemVal.Set(reflect.Zero(elemVal.Type()))
+}
+
+// resolveMockVar returns a reflect.Value addressing the package-level mock
+// variable for original, or fatally fails the test with a targeted
+// diagnostic if the function cannot be mocked.
+func resolveMockVar[F any](t *testing.T, original F) reflect.Value {
+	t.Helper()
+
 	name := funcName(original)
+
+	if msg := methodValueError(name); msg != "" {
+		t.Fatal(msg)
+		return reflect.Value{}
+	}
 
 	mockPtrAny, ok := registry.Load(name)
 	if !ok {
@@ -55,21 +95,10 @@ func Func[F any](t *testing.T, original F, replacement F) {
 				"    3. Re-run your tests",
 				name, goflags)
 		}
+		return reflect.Value{}
 	}
 
-	ptrVal := reflect.ValueOf(mockPtrAny)
-	elemVal := ptrVal.Elem()
-
-	// Save current value (may be nil)
-	oldVal := reflect.New(elemVal.Type()).Elem()
-	oldVal.Set(elemVal)
-
-	// Set replacement
-	elemVal.Set(reflect.ValueOf(replacement))
-
-	t.Cleanup(func() {
-		elemVal.Set(oldVal)
-	})
+	return reflect.ValueOf(mockPtrAny).Elem()
 }
 
 // Replace swaps the value at target with replacement for the duration of the test.
@@ -79,6 +108,30 @@ func Replace[F any](t *testing.T, target *F, replacement F) {
 	old := *target
 	*target = replacement
 	t.Cleanup(func() { *target = old })
+}
+
+// methodValueError returns a targeted error message if name looks like a
+// method value (has a "-fm" suffix produced by runtime.FuncForPC), or ""
+// otherwise. Method values are unsupported because method mocks are global:
+// the mock replaces the method for all instances of the type, so binding to
+// a specific instance is misleading. Users must pass a method expression
+// such as (*pkg.Type).Method instead.
+func methodValueError(name string) string {
+	if !strings.HasSuffix(name, "-fm") {
+		return ""
+	}
+	cleaned := strings.TrimSuffix(name, "-fm")
+	return fmt.Sprintf(
+		"rewire: %s looks like a method value (e.g. instance.Method) — rewire needs a method expression.\n"+
+			"  Method mocks in rewire are global (all instances of the type share one mock), "+
+			"so binding to a specific instance is not supported.\n"+
+			"  Change:\n"+
+			"      rewire.Func(t, instance.Method, replacement)\n"+
+			"  to the method expression form, e.g.:\n"+
+			"      rewire.Func(t, (*pkg.Type).Method, replacement)\n"+
+			"  The resolved name was %q; the underlying method is %q.",
+		name, name, cleaned,
+	)
 }
 
 func funcName[F any](f F) string {

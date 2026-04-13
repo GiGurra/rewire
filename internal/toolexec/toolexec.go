@@ -244,6 +244,13 @@ func generateRegistration(compileArgs []string, targets mockTargets) (string, er
 		return "", nil
 	}
 
+	// If the test package doesn't import rewire, we can't emit a
+	// registration file that calls rewire.Register. This also avoids an
+	// import cycle when compiling the rewire package's own tests.
+	if !allImports["github.com/GiGurra/rewire/pkg/rewire"] {
+		return "", nil
+	}
+
 	type entry struct {
 		importPath string
 		alias      string

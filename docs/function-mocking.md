@@ -60,6 +60,26 @@ func TestWelcome_Real(t *testing.T) {
 }
 ```
 
+## Restoring mocks mid-test
+
+Mocks are normally restored automatically when the test ends (via `t.Cleanup`). If you need to end a mock earlier — for example, mock a dependency during setup but run the actual test body against the real implementation — call `rewire.Restore`:
+
+```go
+func TestFixtureSetupThenRealCall(t *testing.T) {
+    rewire.Func(t, os.Getwd, func() (string, error) {
+        return "/fixture", nil
+    })
+
+    // ... setup code that depends on os.Getwd returning /fixture ...
+
+    rewire.Restore(t, os.Getwd)
+
+    // ... test body now sees the real os.Getwd ...
+}
+```
+
+`Restore` is idempotent — you can call it any number of times, and it's safe to call even when no mock is currently active. The automatic cleanup installed by `Func` still runs correctly afterwards.
+
 ## Closure capture
 
 The replacement function is a regular Go closure, so it can capture variables from the test scope:
