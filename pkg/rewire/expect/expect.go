@@ -107,6 +107,63 @@ func For[F any](t *testing.T, target F) *Expectation[F] {
 	return e
 }
 
+// ForInstance installs an expectation-driven mock scoped to a single
+// receiver, using rewire.InstanceMethod under the hood instead of
+// rewire.Func. Works for two related cases:
+//
+//  1. A pointer-receiver method on a concrete type:
+//
+//	s1 := &bar.Server{Name: "primary"}
+//	e := expect.ForInstance(t, s1, (*bar.Server).Handle)
+//	e.On("ping").Returns("pong from primary")
+//	// Other *bar.Server instances still run the real Handle.
+//
+//  2. An interface method on a rewire.NewMock instance:
+//
+//	greeter := rewire.NewMock[bar.GreeterIface](t)
+//	e := expect.ForInstance(t, greeter, bar.GreeterIface.Greet)
+//	e.On("Alice").Returns("hi Alice")
+//	e.OnAny().Returns("hi other")
+//
+// The returned *Expectation[F] supports the same rule-builder API as
+// For (.On / .Match / .OnAny / .Returns / .DoFunc / .Times / .AtLeast
+// / .Never / .Maybe / .Wait), and the same verification at test end.
+//
+// Differences from For:
+//
+//   - Installation goes through rewire.InstanceMethod, so only calls
+//     whose receiver is `instance` are routed through the dispatcher.
+//     Calls from other instances still see the global mock (if any)
+//     or the real implementation.
+//
+//   - The real implementation is NOT captured. Interface method
+//     expressions have no registered real, and for per-instance
+//     concrete method mocks the "fallthrough to real" semantic is
+//     already handled at a lower level by the wrapper's dispatch
+//     order (per-instance → global → real). As a result,
+//     .AllowUnmatched() is not supported on ForInstance — use an
+//     explicit .OnAny().Returns(...) catch-all rule instead.
+func ForInstance[I any, F any](t *testing.T, instance I, target F) *Expectation[F] {
+	t.Helper()
+
+	e := newExpectation[F](t, target)
+	if e == nil {
+		return nil
+	}
+
+	// Intentionally do NOT capture rewire.Real(t, target) here:
+	// interface method expressions have no registered real, and for
+	// per-instance concrete mocks unmatched calls should surface as
+	// test failures (or be caught explicitly via .OnAny()).
+	// Leaving realFn nil is fine because the dispatcher's unmatched
+	// path checks validity before calling it.
+
+	dispatcher := reflect.MakeFunc(e.fnType, e.dispatch).Interface().(F)
+	rewire.InstanceMethod(t, instance, target, dispatcher)
+
+	return e
+}
+
 // newExpectation builds an Expectation[F] and registers its verifier
 // cleanup, but does NOT call rewire.Func or rewire.Real. Used by For
 // for the normal path and by the DSL's own unit tests to exercise the

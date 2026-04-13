@@ -40,7 +40,19 @@ func (e *Expectation[F]) dispatch(args []reflect.Value) []reflect.Value {
 
 	// Unmatched path.
 	if allowUnmatched {
-		return reflect.ValueOf(e.realFn).Call(args)
+		// ForInstance expectations intentionally leave realFn nil —
+		// there is no real implementation to fall through to for
+		// interface-method mocks, and per-instance concrete mocks
+		// already get the fallthrough for free at the wrapper level.
+		// Calling .AllowUnmatched() on such expectations is not
+		// supported, but we guard against it defensively: if realFn
+		// isn't a usable function value, return zero values rather
+		// than panicking.
+		rv := reflect.ValueOf(e.realFn)
+		if rv.IsValid() && rv.Kind() == reflect.Func && !rv.IsNil() {
+			return rv.Call(args)
+		}
+		return zeroValues(e.fnType)
 	}
 	e.t.Errorf("rewire/expect: unexpected call to %s(%s) — no rule matched",
 		e.name, formatCallArgs(args))

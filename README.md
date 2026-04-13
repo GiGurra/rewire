@@ -165,6 +165,8 @@ func TestService_GreetingFlow(t *testing.T) {
 
 Two mocks of the same interface are scoped independently — stubs on one don't leak to the other. Unstubbed methods return zero values. `rewire.Restore(t, mock)` clears every stub on a mock.
 
+For tests that need multi-pattern stubbing, argument predicates, call-count bounds, or automatic "was this actually called?" verification, the [expectation DSL](docs/expectations.md) has an `expect.ForInstance(t, mock, bar.GreeterIface.Greet)` entry point that wraps `NewMock` mocks (and per-instance concrete methods) with the same rule-builder API as `expect.For`.
+
 The toolexec wrapper scans test files for `rewire.NewMock[X]` references, parses the interface's source, and emits a backing struct into the test package's compile args. You never see the generated code and never commit it — it's the same mechanism rewire uses to emit method-mock wrappers and per-instance dispatch tables.
 
 **Current scope (Phase 1):** non-generic interfaces, methods using builtin or already-qualified types. Embedded interfaces, types from the interface's own declaring package, and generic interfaces are Phase 2+ items (rejected with a clear error for now).

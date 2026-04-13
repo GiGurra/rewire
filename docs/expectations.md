@@ -44,6 +44,77 @@ Each rule has its own matching logic and call-count bound, and cleanup automatic
 
 From the moment `expect.For` returns, the target is mocked. Every subsequent `.On(...)`, `.Match(...)`, `.OnAny()` call appends to the rule list under a mutex, and the dispatcher re-reads the list on every call — so rules added later still apply to later calls.
 
+## Per-instance and interface-mock expectations — `expect.ForInstance`
+
+`expect.For` installs a **global** mock — matching `rewire.Func` semantics. For two cases the global mode isn't what you want:
+
+- **Per-instance concrete methods** — you want expectations that fire only when a specific receiver is called, not every `*bar.Server`.
+- **Interface methods on a `rewire.NewMock` instance** — there is no global; each mock is its own universe.
+
+Both are handled by `expect.ForInstance(t, instance, target)`. Same rule-builder API (`.On`, `.Match`, `.OnAny`, `.Returns`, `.DoFunc`, `.Times`, `.AtLeast`, `.Never`, `.Maybe`, `.Wait`), but installation goes through `rewire.InstanceMethod` under the hood so the expectation is scoped to one receiver.
+
+### Concrete method, per-instance
+
+```go
+s1 := &bar.Server{Name: "primary"}
+s2 := &bar.Server{Name: "secondary"}
+
+e := expect.ForInstance(t, s1, (*bar.Server).Handle)
+e.On(s1, "ping").Returns("pong from primary")
+e.OnAny().Returns("primary-fallback")
+
+s1.Handle("ping")   // "pong from primary"   — matched rule on e
+s1.Handle("other")  // "primary-fallback"    — .OnAny() on e
+s2.Handle("ping")   // real Handle body      — s2 has no expectation
+```
+
+Note the first argument to `.On(...)` is the receiver itself (`s1`), matching the method expression's signature `func(*bar.Server, string) string`.
+
+### Interface method via `rewire.NewMock`
+
+```go
+greeter := rewire.NewMock[bar.GreeterIface](t)
+
+e := expect.ForInstance(t, greeter, bar.GreeterIface.Greet)
+e.On(greeter, "Alice").Returns("hi Alice")
+e.Match(func(g bar.GreeterIface, name string) bool {
+    return strings.HasPrefix(name, "admin_")
+}).Returns("admin")
+e.OnAny().Returns("hi other")
+
+greeter.Greet("Alice")      // "hi Alice"
+greeter.Greet("admin_root") // "admin"
+greeter.Greet("Bob")        // "hi other"
+```
+
+No `go:generate`, no committed mock files — the backing struct for `bar.GreeterIface` is synthesized at test compile time. See [Interface Mocks](interface-mocks.md#toolexec-mocks-rewirenewmockt) for the mock side of the story.
+
+### Two mocks of the same interface
+
+Expectations on one don't affect the other. Cleanup verifies call-count bounds on both independently.
+
+```go
+g1 := rewire.NewMock[bar.GreeterIface](t)
+g2 := rewire.NewMock[bar.GreeterIface](t)
+
+e1 := expect.ForInstance(t, g1, bar.GreeterIface.Greet)
+e1.OnAny().Returns("from g1")
+
+e2 := expect.ForInstance(t, g2, bar.GreeterIface.Greet)
+e2.OnAny().Returns("from g2")
+```
+
+### Differences from `expect.For`
+
+| Feature | `For` | `ForInstance` |
+|---|---|---|
+| Install path | `rewire.Func` (global) | `rewire.InstanceMethod` (per-receiver) |
+| Valid targets | Free functions, method expressions (concrete types) | Pointer-receiver method expressions, interface method expressions |
+| Capture of real impl | Yes (used by `.AllowUnmatched()`) | No |
+| `.AllowUnmatched()` | Supported — falls through to real | Not supported — use `.OnAny().Returns(...)` as a catch-all rule |
+
+The rule-builder surface is otherwise identical — `Returns`, `DoFunc`, bounds (`Times`, `AtLeast`, `Never`, `Maybe`), and `Wait` all work exactly the same way.
+
 ## Matching patterns
 
 ### Literal equality — `.On(args...)`
