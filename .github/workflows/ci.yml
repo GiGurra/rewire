@@ -40,6 +40,9 @@ jobs:
           go clean -cache
           GOFLAGS="-toolexec=rewire" GOCACHE="$HOME/.cache/rewire-test" go test ./example/... -count=1
 
+      - name: Verify inlining of rewire wrappers
+        run: scripts/check-inlining.sh
+
   release:
     name: Release
     runs-on: ubuntu-latest

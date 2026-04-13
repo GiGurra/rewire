@@ -94,6 +94,24 @@ GOFLAGS="-toolexec=rewire" GOCACHE="$HOME/.cache/rewire-test" go test ./...
 
 This keeps `go build` (production) and `go test` (with rewire) from sharing cached artifacts.
 
+## Inlining
+
+Go's compiler aggressively inlines small leaf functions. For rewire-rewritten code, we verified that the inliner inlines:
+
+1. The wrapper function (the one that does the `Mock_` nil check) into its callers, and
+2. `_real_<Name>` into the wrapper itself.
+
+The result at every inlined call site is the full unrolled form:
+
+```go
+if _rewire_mock := Mock_X; _rewire_mock != nil {
+    return _rewire_mock(args)
+}
+return <real body>   // inlined _real_X
+```
+
+So the mock check fires at every call site — inlining can't bypass it — and the fast path (no mock installed) costs only a nil check beyond the original implementation. `scripts/check-inlining.sh` runs in CI and asserts the expected inlining decisions appear in `go build -gcflags=-m=2` output.
+
 ## Compiler intrinsics
 
 Some functions (e.g., `math.Abs`, `math.Sqrt`) are replaced by CPU instructions at the **call site** by the Go compiler. Even though rewire can rewrite the function body, callers bypass it entirely.

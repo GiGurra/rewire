@@ -61,3 +61,4 @@ Inspired by Erlang's [meck](https://github.com/eproxus/meck), although the under
 - [Function Mocking](function-mocking.md) — replace any function at test time
 - [Method Mocking](method-mocking.md) — mock struct methods
 - [Interface Mocks](interface-mocks.md) — generate mock structs for interfaces
+- [Roadmap](roadmap.md) — planned work and known gaps vs other mocking libraries
