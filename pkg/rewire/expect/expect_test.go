@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // These unit tests exercise the DSL's internal validation and state
@@ -243,8 +245,7 @@ func (r *recordingT) runCleanups() {
 }
 
 func formatMsg(format string, args ...any) string {
-	// Minimal: no actual formatting — we just need substring matching.
-	return format + fmt.Sprintf("%v", args)
+	return fmt.Sprintf(format, args...)
 }
 
 func formatArgsPlain(args []any) string {
@@ -367,6 +368,94 @@ func TestDispatch_DoFuncInvokesCallback(t *testing.T) {
 	out := e.dispatch([]reflect.Value{reflect.ValueOf(3), reflect.ValueOf(4)})
 	if got := out[0].Int(); got != 3004 {
 		t.Errorf("DoFunc should produce 3004, got %d", got)
+	}
+}
+
+// --- Wait / async tests -----------------------------------------------------
+
+func TestWait_ReturnsOnceCountReached(t *testing.T) {
+	r := &recordingT{}
+	target := func(name string) string { return "" }
+	e := newExpectation[func(string) string](r, target)
+	rule := e.OnAny().Returns("hi")
+
+	// Dispatch twice from a goroutine after a small delay.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		time.Sleep(20 * time.Millisecond)
+		_ = e.dispatch([]reflect.Value{reflect.ValueOf("a")})
+		_ = e.dispatch([]reflect.Value{reflect.ValueOf("b")})
+	}()
+
+	start := time.Now()
+	rule.Wait(2, 2*time.Second)
+	elapsed := time.Since(start)
+
+	wg.Wait()
+
+	if len(r.errors) > 0 {
+		t.Errorf("Wait should not have errored, got: %v", r.errors)
+	}
+	// Sanity: we shouldn't have waited anywhere near the full timeout.
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("Wait took %s, expected < 500ms since the goroutine dispatched after 20ms", elapsed)
+	}
+}
+
+func TestWait_TimesOutWithClearMessage(t *testing.T) {
+	r := &recordingT{}
+	target := func(name string) string { return "" }
+	e := newExpectation[func(string) string](r, target)
+	rule := e.OnAny().Returns("hi")
+
+	// Nobody dispatches. Wait should time out.
+	rule.Wait(1, 50*time.Millisecond)
+
+	if len(r.errors) == 0 {
+		t.Fatal("expected Wait to report an error on timeout")
+	}
+	msg := r.errors[0]
+	if !strings.Contains(msg, "did not reach 1") {
+		t.Errorf("expected 'did not reach 1' in diagnostic, got: %s", msg)
+	}
+	if !strings.Contains(msg, "got 0") {
+		t.Errorf("expected 'got 0' in diagnostic, got: %s", msg)
+	}
+}
+
+func TestWait_ReturnsImmediatelyWhenAlreadyReached(t *testing.T) {
+	r := &recordingT{}
+	target := func(name string) string { return "" }
+	e := newExpectation[func(string) string](r, target)
+	rule := e.OnAny().Returns("hi")
+
+	// Dispatch twice synchronously first.
+	_ = e.dispatch([]reflect.Value{reflect.ValueOf("a")})
+	_ = e.dispatch([]reflect.Value{reflect.ValueOf("b")})
+
+	start := time.Now()
+	rule.Wait(2, 2*time.Second)
+	elapsed := time.Since(start)
+
+	if len(r.errors) > 0 {
+		t.Errorf("Wait should not have errored, got: %v", r.errors)
+	}
+	if elapsed > 50*time.Millisecond {
+		t.Errorf("Wait took %s, expected near-instant return when count is already satisfied", elapsed)
+	}
+}
+
+func TestWait_NegativeCountFails(t *testing.T) {
+	r := &recordingT{}
+	target := func(name string) string { return "" }
+	e := newExpectation[func(string) string](r, target)
+	rule := e.OnAny().Returns("hi")
+
+	rule.Wait(-1, 10*time.Millisecond)
+	if len(r.fatals) == 0 {
+		t.Error("expected Wait(-1) to produce a fatal diagnostic")
 	}
 }
 

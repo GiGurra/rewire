@@ -28,6 +28,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GiGurra/rewire/pkg/rewire"
 )
@@ -290,6 +291,48 @@ func (r *Rule[F]) Maybe() *Rule[F] {
 	r.parent.t.Helper()
 	r.bound = bound{kind: boundAny}
 	return r
+}
+
+// Wait blocks until the rule has matched at least n calls, or the
+// timeout elapses. On timeout, the test is failed via t.Errorf with a
+// diagnostic showing the rule, the expected count, and the actual
+// count at deadline.
+//
+// Wait is useful for tests that kick off async work and need to
+// synchronize before asserting — e.g. launching a goroutine that
+// eventually calls the mocked function, then waiting for it to have
+// happened before the test body continues.
+//
+// Implementation is a simple 10ms poll. The polling overhead is
+// invisible in test timings, and keeping it polling-based avoids
+// per-rule signaling state that would complicate the dispatcher.
+//
+// Wait on a .Never() rule is not meaningful — the rule's count is
+// expected to stay 0, so Wait would always time out. Don't do that.
+func (r *Rule[F]) Wait(n int, timeout time.Duration) *Rule[F] {
+	r.parent.t.Helper()
+	if n < 0 {
+		r.parent.t.Fatalf("rewire/expect: Wait(%d, ...) — count must be non-negative", n)
+		return r
+	}
+	deadline := time.Now().Add(timeout)
+	const tick = 10 * time.Millisecond
+	for {
+		r.parent.mu.Lock()
+		count := r.count
+		r.parent.mu.Unlock()
+		if count >= n {
+			return r
+		}
+		if !time.Now().Before(deadline) {
+			r.parent.t.Errorf(
+				"rewire/expect: %s rule %s (declared at %s) did not reach %d match(es) within %s (got %d)",
+				r.parent.name, r.matcher.describe(), r.site, n, timeout, count,
+			)
+			return r
+		}
+		time.Sleep(tick)
+	}
 }
 
 // callerSite returns file:line of the caller skip frames up, for use

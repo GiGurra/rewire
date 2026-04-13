@@ -209,6 +209,43 @@ e.OnAny().Returns("fine")
 // with a clear "matched but was declared .Never()" diagnostic.
 ```
 
+## Async testing — `Wait(count, timeout)`
+
+For tests that kick off goroutines which eventually call the mocked function, use `Wait` on the rule to block until the rule has matched a given count, with a timeout.
+
+```go
+e := expect.For(t, bar.Greet)
+rule := e.OnAny().DoFunc(func(name string) string {
+    return "async-" + name
+})
+
+// Fire off async work that eventually calls bar.Greet a few times.
+go startBackgroundWorker()
+
+// Block until the rule has matched 3 times, or fail after 2 seconds.
+rule.Wait(3, 2*time.Second)
+
+// After Wait returns, the test body can safely assert post-state.
+```
+
+Details:
+
+- **Semantics**: blocks until `r.count >= n`. Returns the rule (for chaining, though chaining past a blocking call is unusual).
+- **Timeout**: on deadline, the test is failed via `t.Errorf` with a diagnostic showing the rule, the expected count, and the actual count at deadline. The test continues (it's not `t.Fatalf`) so other assertions can still run.
+- **Immediate return**: if the count is already satisfied when `Wait` is called, it returns without sleeping. Safe to use synchronously after calls that have already happened.
+- **Implementation**: simple 10ms polling loop over the rule's live count. No extra signaling state or channels. Polling latency is invisible in test timings.
+- **Thread safety**: the rule's count is always read under the expectation's mutex — same mutex the dispatcher holds when incrementing. Safe under concurrent calls from any number of goroutines.
+- **Interaction with bounds**: `Wait` complements `.Times(n)` / `.AtLeast(n)`. You typically set both — the bound verifies at cleanup that the expected count was reached, and `Wait` synchronizes the test body to the actual async completion. If `Wait` times out, cleanup's bound check also fails; both errors surface.
+- **Don't use with `.Never()`** — a Never rule is expected to never match, so `Wait` would always time out. Not meaningful.
+
+### How other libraries handle this
+
+- **Mockito (Java)** uses `verify(mock, timeout(2000)).method()` — a timeout-aware verifier that polls until the assertion passes or fails.
+- **testify (Go)** has `assert.Eventually(t, cond, wait, tick)` — a general-purpose condition poller, not mock-specific.
+- **gomock (Go)** has nothing built-in; users typically synchronize manually with `sync.WaitGroup` or channels inside a `DoAndReturn` callback.
+
+Rewire's `Wait` fits the Mockito-style pattern but anchored on the rule object you already have, so there's no extra verifier object or global state.
+
 ## Unmatched calls
 
 By default, calls that match no rule fail the test at call time:

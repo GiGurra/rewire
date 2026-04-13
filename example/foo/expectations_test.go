@@ -2,7 +2,9 @@ package foo
 
 import (
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/GiGurra/rewire/example/bar"
 	"github.com/GiGurra/rewire/pkg/rewire"
@@ -398,6 +400,40 @@ func TestExpect_InputDependentWithBranching(t *testing.T) {
 	}
 	_ = e
 }
+
+// Wait synchronizes async work that eventually calls the mocked
+// function. The test kicks off a goroutine that calls bar.Greet a
+// few times after a short delay, then Wait blocks until the rule
+// has matched the expected count before the test body continues.
+func TestExpect_WaitForAsyncWork(t *testing.T) {
+	e := expect.For(t, bar.Greet)
+	rule := e.OnAny().DoFunc(func(name string) string {
+		return "async-" + name
+	})
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		time.Sleep(30 * time.Millisecond)
+		bar.Greet("a")
+		bar.Greet("b")
+		bar.Greet("c")
+	}()
+
+	// Block until the rule has matched 3 times or 2 seconds elapse.
+	rule.Wait(3, 2*time.Second)
+
+	// After Wait returns, the test can assert directly.
+	wg.Wait()
+}
+
+// Note: the "Wait timing out correctly fails the test" path is
+// covered by TestWait_TimesOutWithClearMessage in
+// pkg/rewire/expect/expect_test.go using a recording testingT fake.
+// An end-to-end subtest would have its failure status propagate up
+// to the parent test, so we can't cleanly assert "this subtest was
+// supposed to fail."
 
 // Chain of DoFunc side effects + call count verification without a
 // separate counter variable.
