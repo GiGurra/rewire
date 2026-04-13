@@ -4,6 +4,41 @@ Replace any package-level function at test time using `rewire.Func`. No interfac
 
 ## Basic usage
 
+Here's a fully self-contained example — no production code to set up, just stdlib. We mock `os.Getwd` and then call `filepath.Abs`, which internally calls `os.Getwd` to resolve a relative path:
+
+```go
+import (
+    "os"
+    "path/filepath"
+    "testing"
+
+    "github.com/GiGurra/rewire/pkg/rewire"
+)
+
+func TestFilepathAbs_WithMockedOsGetwd(t *testing.T) {
+    rewire.Func(t, os.Getwd, func() (string, error) {
+        return "/mocked", nil
+    })
+
+    got, _ := filepath.Abs("foo")
+    // got == "/mocked/foo"
+}
+```
+
+`filepath.Abs` lives in `path/filepath`, calls `os.Getwd` which lives in `os`, and neither package belongs to your project. Rewire rewrites `os.Getwd` at compile time, so when `filepath.Abs` reaches the call site, it gets the mocked version.
+
+The three arguments to `rewire.Func`:
+
+1. `t` — the test context (used for automatic cleanup)
+2. `os.Getwd` — the original function to replace
+3. The replacement — must have the same signature
+
+The mock is automatically restored after the test via `t.Cleanup`.
+
+## Mocking your own code
+
+The same API works on functions in your own module:
+
 ```go
 import (
     "testing"
@@ -17,36 +52,13 @@ func TestWelcome_WithMock(t *testing.T) {
     })
 
     got := Welcome("Alice")
-    // bar.Greet returns "Howdy, Alice"
+    // Welcome internally calls bar.Greet, which now returns "Howdy, Alice"
 }
 
 func TestWelcome_Real(t *testing.T) {
     // bar.Greet uses the real implementation — mocks are per-test
 }
 ```
-
-The three arguments to `rewire.Func`:
-
-1. `t` — the test context (used for automatic cleanup)
-2. `bar.Greet` — the original function to replace
-3. The replacement — must have the same signature
-
-The mock is automatically restored after the test via `t.Cleanup`.
-
-## Mocking stdlib and third-party packages
-
-Rewire works with any package, not just your own module:
-
-```go
-func TestSquareRoot(t *testing.T) {
-    rewire.Func(t, math.Pow, func(x, y float64) float64 {
-        return 42
-    })
-    // math.Pow now returns 42 in this test
-}
-```
-
-This works because rewire intercepts the compiler — it can rewrite functions in any package that gets compiled.
 
 ## Closure capture
 

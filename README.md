@@ -32,7 +32,32 @@ GOFLAGS="-toolexec=rewire" go test ./...
 <details>
 <summary><strong>Function mocking</strong> — replace any function at test time, no code changes required</summary>
 
-Given production code:
+Here's a fully self-contained example — no production code to set up, just stdlib. We mock `os.Getwd` and then call `filepath.Abs`, which internally calls `os.Getwd` to resolve a relative path:
+
+```go
+package foo
+
+import (
+    "os"
+    "path/filepath"
+    "testing"
+
+    "github.com/GiGurra/rewire/pkg/rewire"
+)
+
+func TestFilepathAbs_WithMockedOsGetwd(t *testing.T) {
+    rewire.Func(t, os.Getwd, func() (string, error) {
+        return "/mocked", nil
+    })
+
+    got, _ := filepath.Abs("foo")
+    // got == "/mocked/foo"
+}
+```
+
+Notice what's happening: `filepath.Abs` lives in `path/filepath`, it calls `os.Getwd` which lives in `os`, and neither package belongs to your project. Rewire rewrites `os.Getwd` at compile time, so when `filepath.Abs` reaches the call site, it gets the mocked version. No interfaces, no dependency injection, no wrappers.
+
+It works the same way on your own code:
 
 ```go
 // bar/bar.go — never modified
@@ -43,42 +68,23 @@ func Greet(name string) string {
 }
 ```
 
-Mock it in tests:
-
 ```go
 // foo/foo_test.go
-package foo
-
-import (
-    "testing"
-    "example/bar"
-    "github.com/GiGurra/rewire/pkg/rewire"
-)
-
 func TestWelcome_WithMock(t *testing.T) {
     rewire.Func(t, bar.Greet, func(name string) string {
         return "Howdy, " + name
     })
 
     got := Welcome("Alice")
-    // bar.Greet returns "Howdy, Alice" — restored automatically after test
+    // Welcome internally calls bar.Greet, which now returns "Howdy, Alice"
 }
 
 func TestWelcome_Real(t *testing.T) {
-    // bar.Greet uses the real implementation here
+    // bar.Greet uses the real implementation here — mocks are per-test
 }
 ```
 
-Pass the original function and its replacement. No mock variable names, no generated types, no interface wrappers. Works with any package — stdlib, third-party, same-module:
-
-```go
-func TestSquareRoot(t *testing.T) {
-    rewire.Func(t, math.Pow, func(x, y float64) float64 {
-        return 42
-    })
-    // math.Pow now returns 42 in this test
-}
-```
+Pass the original function and its replacement. No mock variable names, no generated types, no interface wrappers. Mocks are automatically restored after each test via `t.Cleanup`.
 
 Requires `GOFLAGS="-toolexec=rewire"` to be set (see [Setup](#recommended-test-specific-environment)).
 

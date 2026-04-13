@@ -26,17 +26,28 @@ For cases where you *do* have interfaces (dependency injection), rewire also gen
 
 ## Quick example
 
+A fully self-contained test — just stdlib, no production code to set up. We mock `os.Getwd` and then call `filepath.Abs`, which internally uses `os.Getwd` to resolve a relative path:
+
 ```go
-func TestWelcome_WithMock(t *testing.T) {
-    // Replace bar.Greet for this test only — no interfaces needed
-    rewire.Func(t, bar.Greet, func(name string) string {
-        return "Howdy, " + name
+import (
+    "os"
+    "path/filepath"
+    "testing"
+
+    "github.com/GiGurra/rewire/pkg/rewire"
+)
+
+func TestFilepathAbs_WithMockedOsGetwd(t *testing.T) {
+    rewire.Func(t, os.Getwd, func() (string, error) {
+        return "/mocked", nil
     })
 
-    got := Welcome("Alice")
-    // bar.Greet returns "Howdy, Alice" — restored automatically after test
+    got, _ := filepath.Abs("foo")
+    // got == "/mocked/foo"
 }
 ```
+
+Notice what's happening: `filepath.Abs` lives in `path/filepath`, it calls `os.Getwd` which lives in `os`, and neither belongs to your project. Rewire rewrites `os.Getwd` at compile time, so when `filepath.Abs` reaches the call site, it gets the mocked version. No interfaces, no dependency injection, no wrappers — and the mock is automatically restored after the test.
 
 ## About this project
 
