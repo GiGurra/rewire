@@ -44,10 +44,6 @@ Rewire's rewrite transformation is small enough that Go's inliner inlines the wr
 
 ## In flight / planned
 
-### Remaining gaps in `rewire.NewMock[T]`
-
-Phase 2a (generic interfaces), Phase 2b (same-package bare type qualification), Phase 2c (embedded interfaces), Phase 2d (module-aware package resolution), and Phase 2e (dot-import support) are all shipped — see the section above. All actionable items in the `rewire.NewMock[T]` roadmap are now complete.
-
 ### API naming pass
 
 Once the full feature scope is stable, a coherent rename + consolidation pass to address vocabulary drift across `Func` / `InstanceMethod` / `NewMock` / `expect.For` / `expect.ForInstance`. Deliberately deferred until the library's surface area has settled — piecemeal renames are worse than one coherent sweep. See `plans/TODO_next_session.md`.
