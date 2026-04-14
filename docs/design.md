@@ -172,33 +172,19 @@ Within a test package, `rewire.Func` uses `t.Cleanup` to restore the mock variab
 
 **Why replaced**: Slow for large packages, broke stdlib packages (compiler directives, variable shadowing), prevented external package mocking. Replaced by targeted rewriting based on pre-scanning test files.
 
-## Interface mock generation
+## Interface mock generation: `rewire.NewMock[T]`
 
-Rewire offers two styles of interface mocking. Both exist because they hit different sweet spots.
+The scanner detects `rewire.NewMock[X]` references in test files, the codegen locates `X`'s source at compile time, and a concrete backing struct is synthesized into the test package's compile args — never written to disk, never committed.
 
-### `rewire.NewMock[T]` — toolexec-driven synthesis (recommended)
-
-The newer approach: the scanner detects `rewire.NewMock[X]` references in test files, the codegen locates `X`'s source at compile time, and a concrete backing struct is synthesized into the test package's compile args — never written to disk, never committed.
-
-Design choices specific to this path:
+Design choices:
 
 - **No committed mock files.** Users reference the interface in a test; rewire handles the rest. Trade-off: gopls can't see the generated struct, so users never name it directly. The API is designed around that (`rewire.NewMock[I]` for creation, interface method expressions like `I.M` for stubbing), and in practice the generated type is invisible.
 - **Same dispatch as per-instance method mocks.** Each generated method body consults a per-method `_ByInstance sync.Map` and falls back to zero-value returns. The sync.Map is populated by `rewire.InstanceMethod(t, mock, I.Method, replacement)` — one stubbing verb across concrete per-instance mocks and interface-method mocks.
-- **Factory registry.** The generated file's `init()` registers a `func() any` factory keyed on the interface's fully-qualified name. `rewire.NewMock[I](t)` looks up the factory by `reflect.TypeOf[I]().String()`-equivalent, calls it, and type-asserts back to `I`. Non-reflective at the hot path — factory lookup is O(1), struct construction is a plain `new`.
+- **Factory registry.** The generated file's `init()` registers a `func() any` factory keyed on the interface's fully-qualified name. `rewire.NewMock[I](t)` looks up the factory by `reflect.TypeFor[I]()`-derived key, calls it, and type-asserts back to `I`. Non-reflective at the hot path — factory lookup is O(1), struct construction is a plain `new`.
 - **Non-zero-size backing struct.** Go's spec explicitly permits pointers to distinct zero-size variables to compare equal, which would break per-instance dispatch since the sync.Map keys on receiver pointer identity. The generator emits `struct{ _ [1]byte }` to force distinct allocations to get distinct addresses. Load-bearing, documented in the generator source.
 - **Current scope.** Non-generic interfaces, generic interfaces with arbitrary type-argument shapes (builtins, slices, maps, pointers, external-package types, nested generic instantiations), and methods using imported types in their signatures. Each generic instantiation produces its own backing struct keyed on `reflect.TypeFor[I]()`, and the scanner forwards per-instantiation import resolution from the test file so type args from packages the interface's declaring file doesn't import (e.g. `Container[time.Duration]`) work correctly. Embedded interfaces and types from the interface's own declaring package are still rejected with clear errors (Phase 2b/2c — see `plans/TODO_toolexec_interface_mocks_phase2.md`).
 
-### `rewire mock` CLI — committed codegen (legacy, still supported)
-
-The original approach: a standalone CLI that reads an interface's source and writes a committed `mock_*_test.go` file with function fields per method. Typically invoked via `go:generate`.
-
-Design choices specific to this path:
-
-- **Codegen over toolexec.** Generated files are committed, reviewable, and fully visible to `gopls`. Trade-off: users have to remember to regenerate when interfaces change.
-- **Function fields.** Each method becomes a `XFunc func(...)` field on the mock struct. Unset fields return zero values via named return parameters and bare `return`.
-- **Only direct methods.** Embedded interfaces are not resolved — only methods directly declared on the interface are generated. Same limitation as Phase 1 of the toolexec path, and a carryover from when this was rewire's only interface-mocking API.
-
-This path is a candidate for deprecation inside rewire once the toolexec `NewMock[T]` path reaches feature parity. Generic interfaces are already handled there (Phase 2a); embedded interfaces and types from the interface's declaring package are the remaining gaps. The two styles coexist today.
+A standalone `rewire mock` CLI subcommand that wrote committed mock files used to coexist with the toolexec path. It was removed once the toolexec path covered the common ground; the toolexec route is now the sole interface-mocking entry point in rewire.
 
 ## Implemented features
 

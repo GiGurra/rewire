@@ -160,9 +160,9 @@ No `go:generate` step. No `mock_*_test.go` files committed to the repo. The tool
 - Unstubbed methods return zero values.
 - `rewire.Restore(t, mock)` clears every stub on a mock.
 
-**Current scope:** non-generic *and* generic interfaces. Generic interfaces support arbitrary type arguments — builtins, slices, maps, pointers, types from external packages, even nested generic instantiations like `Container[Container[int]]` — and each instantiation produces its own backing struct keyed by reflect's instantiation-aware type name. Embedded interfaces and types from the interface's own declaring package are still rejected with clear errors (Phase 2b/2c).
+**Current scope:** non-generic *and* generic interfaces. Generic interfaces support arbitrary type arguments — builtins, slices, maps, pointers, types from external packages, even nested generic instantiations like `Container[Container[int]]` — and each instantiation produces its own backing struct keyed by reflect's instantiation-aware type name. Embedded interfaces and types from the interface's own declaring package are still rejected with clear errors.
 
-Rewire also ships an older `rewire mock` CLI that writes a committed mock file — useful when you want to review the generated code. It's still fully supported; over time the `rewire.NewMock[T]` path is intended to become rewire's canonical interface-mock API. See [Interface Mocks](docs/interface-mocks.md) for both styles.
+See [Interface Mocks](docs/interface-mocks.md) for the full feature set.
 
 </details>
 
@@ -213,7 +213,7 @@ Go has plenty of mocking libraries, but most of them pick *one* spot on this gri
 | Mock a stdlib or third-party function | Runtime binary patching (unsafe, platform-specific, breaks under inlining) | Compile-time rewrite (safe, portable, verified compatible with inlining) |
 | Mock a struct method without touching production code | Extract an interface + dependency injection | Method expression — no interface, no DI |
 | Mock *one specific instance* of a type | Extract an interface, inject per instance | `rewire.InstanceMethod` — scoped by receiver pointer |
-| Mock an interface | `go:generate` a mock file, commit it, regenerate on every change | `rewire.NewMock[T]` — backing struct synthesized at compile time, nothing committed |
+| Mock an interface | `go:generate` a mock file, commit it, regenerate on every change | `rewire.NewMock[T]` — backing struct synthesized at compile time, nothing generated, nothing committed |
 | Multi-pattern expectations with call-count verification | A separate DSL tied to one of the above styles | `expect.For` / `expect.ForInstance` — the same DSL works on *all* of the above |
 
 Each cell of rewire's column uses the same compile-time rewriting machinery underneath, so they compose. You can mix global mocks, per-instance mocks, and interface mocks in a single test, all with the same verbs.

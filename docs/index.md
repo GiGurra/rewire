@@ -77,7 +77,7 @@ Inspired by Erlang's [meck](https://github.com/eproxus/meck). The user experienc
 - [Getting Started](getting-started.md) — install and run your first mock
 - [Function Mocking](function-mocking.md) — replace any function at test time
 - [Method Mocking](method-mocking.md) — global and per-instance method mocks
-- [Interface Mocks](interface-mocks.md) — `rewire.NewMock[T]` and the older `rewire mock` CLI
+- [Interface Mocks](interface-mocks.md) — `rewire.NewMock[T]` for non-generic and generic interfaces
 - [Expectations DSL](expectations.md) — declarative `.On(args).Returns(v).Times(n)` style, plus per-instance and interface-mock entry points
 - [How It Works](how-it-works.md) — the toolexec pipeline, rewrite transformations, dispatch mechanics
 - [Setup](setup.md) — IDE and terminal configuration

@@ -1,6 +1,6 @@
 # Setup
 
-Function and method mocking requires `GOFLAGS="-toolexec=rewire"` to be set. Interface mock generation (`rewire mock`) does not require any setup.
+All of rewire's mock generation — function/method mocking via `rewire.Func` / `rewire.InstanceMethod`, and interface mocking via `rewire.NewMock[T]` — runs through the same `-toolexec=rewire` pipeline. So this one setup step covers everything.
 
 ## Recommended: test-specific environment
 

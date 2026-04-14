@@ -87,7 +87,7 @@ greeter.Greet("admin_root") // "admin"
 greeter.Greet("Bob")        // "hi other"
 ```
 
-No `go:generate`, no committed mock files — the backing struct for `bar.GreeterIface` is synthesized at test compile time. See [Interface Mocks](interface-mocks.md#toolexec-mocks-rewirenewmockt) for the mock side of the story.
+No `go:generate`, no committed mock files — the backing struct for `bar.GreeterIface` is synthesized at test compile time. See [Interface Mocks](interface-mocks.md) for the mock side of the story.
 
 ### Two mocks of the same interface
 

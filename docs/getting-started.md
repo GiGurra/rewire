@@ -110,7 +110,7 @@ The toolexec wrapper scans test files for `rewire.NewMock[X]` references, parses
 
 Two mocks of the same interface are scoped independently via the same per-instance dispatch that backs `rewire.InstanceMethod`. Unstubbed methods return zero values. `rewire.Restore(t, mock)` clears every stub bound to a mock.
 
-Rewire also ships an older `rewire mock` CLI (usually invoked via `go:generate`) that produces a committed mock file — useful when you want to review the generated code. See [Interface Mocks](interface-mocks.md) for both styles and the `NewMock[T]` vs CLI trade-offs.
+See [Interface Mocks](interface-mocks.md) for the full feature set, including generic interfaces.
 
 ## Expectation DSL (optional)
 
@@ -131,6 +131,6 @@ Use `expect.ForInstance(t, mock, target)` to get the same DSL for per-instance m
 
 - [Function Mocking](function-mocking.md) — detailed guide with examples
 - [Method Mocking](method-mocking.md) — global + per-instance method mocks
-- [Interface Mocks](interface-mocks.md) — `NewMock[T]` and the older `rewire mock` CLI
+- [Interface Mocks](interface-mocks.md) — `NewMock[T]` for non-generic and generic interfaces
 - [Expectations DSL](expectations.md) — `.On` / `.Match` / `.OnAny` / `.Returns` / `.Times` and friends
 - [Setup](setup.md) — IDE and terminal configuration

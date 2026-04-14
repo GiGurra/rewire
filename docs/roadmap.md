@@ -18,13 +18,9 @@ Mock struct methods via Go method expressions (`(*Type).Method` or `Type.Method`
 
 ### Interface mocks via `rewire.NewMock[T]`
 
-Synthesize a concrete backing struct for an interface at compile time, triggered purely by a reference in a test. No `go:generate`, no committed `mock_*_test.go` files. Stubbing uses the same `rewire.InstanceMethod` verb as per-instance concrete method mocks — one API vocabulary across both. See [Interface Mocks](interface-mocks.md#toolexec-mocks-rewirenewmockt).
+Synthesize a concrete backing struct for an interface at compile time, triggered purely by a reference in a test. No `go:generate`, no committed `mock_*_test.go` files, no separate CLI invocation. Stubbing uses the same `rewire.InstanceMethod` verb as per-instance concrete method mocks — one API vocabulary across both. See [Interface Mocks](interface-mocks.md).
 
-Handles non-generic interfaces *and* generic interfaces with arbitrary type-argument shapes (builtins, slices, maps, pointers, external-package types, nested generics). Each instantiation produces its own backing struct keyed on `reflect.TypeFor[I]()`. Embedded interfaces and types from the interface's own declaring package are still gaps (see Phase 2b/2c below).
-
-### Interface mock CLI (`rewire mock`)
-
-The original interface-mocking API, still fully supported: a CLI that generates committed mock structs with function fields, typically invoked via `go:generate`. Useful when you want the generated code checked into the repo for review. Candidate for deprecation inside rewire once the `rewire.NewMock[T]` path reaches full feature parity; the two styles coexist today. See [Interface Mocks](interface-mocks.md#cli-mocks-rewire-mock--gogenerate).
+Handles non-generic interfaces *and* generic interfaces with arbitrary type-argument shapes (builtins, slices, maps, pointers, external-package types, nested generics). Each instantiation produces its own backing struct keyed on `reflect.TypeFor[I]()`. Embedded interfaces and types from the interface's own declaring package are still gaps (see "Remaining gaps" below).
 
 ### Expectation DSL
 

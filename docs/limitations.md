@@ -27,10 +27,8 @@ Functions implemented in assembly (no Go body) cannot be rewritten. These are ty
 
 The toolexec interface mock generator handles non-generic interfaces, generic interfaces with arbitrary type-argument shapes (builtins, slices, maps, pointers, external-package types, nested generic instantiations), and methods using imported types. The remaining gaps:
 
-- **Embedded interfaces** — an interface that includes another interface (`io.ReadCloser` embeds `io.Reader` + `io.Closer`) is rejected with a clear error. Workaround: define the composed method set inline, or use the older `rewire mock` CLI.
+- **Embedded interfaces** — an interface that includes another interface (`io.ReadCloser` embeds `io.Reader` + `io.Closer`) is rejected with a clear error. Workaround: define the composed method set inline.
 - **Types from the interface's own declaring package** — an interface in `bar/` whose method signatures reference `*bar.Greeter` directly (rather than via the `bar.` qualifier) is rejected. The codegen needs to qualify bare identifiers with the declaring package alias before this works.
-
-The CLI mock generator (`rewire mock` — the older `go:generate`-style path) has a different scope: it does NOT support generic interfaces but accepts most other shapes silently. If you need generic interface mocking, use `rewire.NewMock[T]` instead.
 
 ## Build cache considerations
 
