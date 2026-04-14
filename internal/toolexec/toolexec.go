@@ -319,10 +319,10 @@ func generateInterfaceMocks(compileArgs []string, tmpDir string) ([]string, func
 		_, _, _, fileMocks := scanFileForMockCalls(arg)
 		for ip, ifaces := range fileMocks {
 			if pkgMockedIfaces[ip] == nil {
-				pkgMockedIfaces[ip] = map[string][][]string{}
+				pkgMockedIfaces[ip] = map[string][]mockInstance{}
 			}
-			for name, combos := range ifaces {
-				pkgMockedIfaces[ip][name] = append(pkgMockedIfaces[ip][name], combos...)
+			for name, instances := range ifaces {
+				pkgMockedIfaces[ip][name] = append(pkgMockedIfaces[ip][name], instances...)
 			}
 		}
 		// Need the test package name for the emitted file's package clause.
@@ -340,11 +340,11 @@ func generateInterfaceMocks(compileArgs []string, tmpDir string) ([]string, func
 		return nil, nil, fmt.Errorf("could not determine test package name for interface mock generation")
 	}
 
-	// Dedupe combos per interface so two test files referencing the
-	// same instantiation only generate one backing struct.
+	// Dedupe instances per interface so two test files referencing
+	// the same instantiation only generate one backing struct.
 	for _, ifaces := range pkgMockedIfaces {
-		for name, combos := range ifaces {
-			ifaces[name] = dedupeTypeArgs(combos)
+		for name, instances := range ifaces {
+			ifaces[name] = dedupeMockInstances(instances)
 		}
 	}
 
@@ -359,19 +359,19 @@ func generateInterfaceMocks(compileArgs []string, tmpDir string) ([]string, func
 			return nil, nil, fmt.Errorf("locating package %s for interface mock generation: %w", importPath, err)
 		}
 
-		for ifaceName, combos := range ifaces {
+		for ifaceName, instances := range ifaces {
 			srcBytes, err := readInterfaceSource(pkgDir, ifaceName)
 			if err != nil {
 				return nil, nil, fmt.Errorf("reading source of interface %s.%s: %w", importPath, ifaceName, err)
 			}
 
 			alias := defaultPkgAlias(importPath)
-			for _, typeArgs := range combos {
-				generated, err := mockgen.GenerateRewireMock(srcBytes, ifaceName, importPath, alias, pkgName, typeArgs)
+			for _, inst := range instances {
+				generated, err := mockgen.GenerateRewireMock(srcBytes, ifaceName, importPath, alias, pkgName, inst.TypeArgs, inst.TypeArgImports)
 				if err != nil {
-					return nil, nil, fmt.Errorf("generating mock for %s.%s%s: %w", importPath, ifaceName, formatTypeArgs(typeArgs), err)
+					return nil, nil, fmt.Errorf("generating mock for %s.%s%s: %w", importPath, ifaceName, formatTypeArgs(inst.TypeArgs), err)
 				}
-				outPath := filepath.Join(tmpDir, fmt.Sprintf("_rewire_mock_%s_%s%s_test.go", alias, ifaceName, mangleTypeArgs(typeArgs)))
+				outPath := filepath.Join(tmpDir, fmt.Sprintf("_rewire_mock_%s_%s%s_test.go", alias, ifaceName, mangleTypeArgs(inst.TypeArgs)))
 				if err := os.WriteFile(outPath, generated, 0644); err != nil {
 					return nil, nil, fmt.Errorf("writing generated mock file: %w", err)
 				}

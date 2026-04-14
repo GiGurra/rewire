@@ -42,7 +42,15 @@ import (
 //     Empty / nil for non-generic interfaces. Each entry is a printed
 //     Go source expression as the user wrote it in the test file
 //     (e.g. "context.Context", "*time.Time").
-func GenerateRewireMock(src []byte, interfaceName, interfacePkgPath, interfacePkgAlias, outputPkg string, typeArgs []string) ([]byte, error) {
+//   - typeArgImports: local-name → import-path map for any package
+//     selectors that appear in the type-arg expressions, derived from
+//     the test file's own imports. Used to emit the right import
+//     declarations in the generated mock file when the type args
+//     reference packages the interface's declaring file doesn't
+//     import (e.g. ContainerIface[time.Duration]). Nil/empty if the
+//     type args reference only builtins or types from the interface's
+//     declaring package.
+func GenerateRewireMock(src []byte, interfaceName, interfacePkgPath, interfacePkgAlias, outputPkg string, typeArgs []string, typeArgImports map[string]string) ([]byte, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "", src, parser.ParseComments)
 	if err != nil {
@@ -215,9 +223,28 @@ func GenerateRewireMock(src []byte, interfaceName, interfacePkgPath, interfacePk
 	var b strings.Builder
 	fmt.Fprintf(&b, "package %s\n\n", outputPkg)
 
-	// Imports.
+	// Imports — deduplicated by (alias, path) to ensure repeated
+	// addImport calls don't emit the same line twice. We track both
+	// the alias (so we don't import two packages under the same local
+	// name) and the import path (so the same package isn't imported
+	// twice under different aliases — Go would accept this but it's
+	// noise in the generated source).
 	var usedImports []string
+	importedAliases := map[string]bool{}
+	importedPaths := map[string]bool{}
 	addImport := func(path, alias string) {
+		if importedPaths[path] {
+			return
+		}
+		effectiveAlias := alias
+		if effectiveAlias == "" {
+			effectiveAlias = defaultPkgAlias(path)
+		}
+		if importedAliases[effectiveAlias] {
+			return
+		}
+		importedAliases[effectiveAlias] = true
+		importedPaths[path] = true
 		defaultAlias := defaultPkgAlias(path)
 		if alias == "" || alias == defaultAlias {
 			usedImports = append(usedImports, fmt.Sprintf("%q", path))
@@ -228,11 +255,22 @@ func GenerateRewireMock(src []byte, interfaceName, interfacePkgPath, interfacePk
 	addImport("sync", "")
 	addImport("github.com/GiGurra/rewire/pkg/rewire", "")
 	addImport(interfacePkgPath, interfacePkgAlias)
-	// Imports referenced by method signatures, minus the interface's own
-	// package alias (which we already added) and minus local-package
-	// references (none expected here since we operate at the file level).
+	// Imports referenced by method signatures. Resolution order:
+	//
+	//   1. typeArgImports — packages referenced by the test file's
+	//      type-arg expressions (e.g. "time" → "time" when the user
+	//      wrote ContainerIface[time.Duration]). The test file knows
+	//      about these via its own imports; the interface's declaring
+	//      file may not.
+	//
+	//   2. imports — the interface's declaring file's imports. Used
+	//      for any package selectors the original method signatures
+	//      reference (e.g. context.Context, io.Reader).
+	//
+	// addImport handles dedup against everything already added above.
 	for localName := range usedPkgs {
-		if localName == interfacePkgAlias {
+		if path, ok := typeArgImports[localName]; ok {
+			addImport(path, localName)
 			continue
 		}
 		if path, ok := imports[localName]; ok {

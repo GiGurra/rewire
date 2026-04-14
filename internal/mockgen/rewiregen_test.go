@@ -14,7 +14,7 @@ type GreeterIface interface {
 	Greet(name string) string
 }
 `)
-	out, err := GenerateRewireMock(src, "GreeterIface", "github.com/example/bar", "bar", "footest", nil)
+	out, err := GenerateRewireMock(src, "GreeterIface", "github.com/example/bar", "bar", "footest", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,7 @@ type Logger interface {
 	Logf(format string, args ...any)
 }
 `)
-	out, err := GenerateRewireMock(src, "Logger", "example/logpkg", "logpkg", "footest", nil)
+	out, err := GenerateRewireMock(src, "Logger", "example/logpkg", "logpkg", "footest", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ type Bigger interface {
 	Name() string
 }
 `)
-	_, err := GenerateRewireMock(src, "Bigger", "example/bar", "bar", "footest", nil)
+	_, err := GenerateRewireMock(src, "Bigger", "example/bar", "bar", "footest", nil, nil)
 	if err == nil {
 		t.Fatal("expected error for embedded interface")
 	}
@@ -116,7 +116,7 @@ type Store[V any] interface {
 	Set(key string, v V)
 }
 `)
-	_, err := GenerateRewireMock(src, "Store", "example/bar", "bar", "footest", nil)
+	_, err := GenerateRewireMock(src, "Store", "example/bar", "bar", "footest", nil, nil)
 	if err == nil {
 		t.Fatal("expected arity error")
 	}
@@ -133,7 +133,7 @@ type Greeter interface {
 	Greet(name string) string
 }
 `)
-	_, err := GenerateRewireMock(src, "Greeter", "example/bar", "bar", "footest", []string{"int"})
+	_, err := GenerateRewireMock(src, "Greeter", "example/bar", "bar", "footest", []string{"int"}, nil)
 	if err == nil {
 		t.Fatal("expected arity error for non-generic interface with type args")
 	}
@@ -154,7 +154,7 @@ type Container[T any] interface {
 	Len() int
 }
 `)
-	out, err := GenerateRewireMock(src, "Container", "github.com/example/bar", "bar", "footest", []string{"int"})
+	out, err := GenerateRewireMock(src, "Container", "github.com/example/bar", "bar", "footest", []string{"int"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,6 +188,70 @@ type Container[T any] interface {
 	}
 }
 
+// Type-arg packages overlapping with the interface declaring file's
+// imports must dedupe — the generator should emit one import line
+// per package, not two. This case: the interface uses
+// context.Context internally, AND the test instantiates it with
+// context.Context as a type argument. typeArgImports has "context",
+// the declaring file's imports also have "context", both should
+// resolve to a single import in the generated source.
+func TestGenerateRewireMock_TypeArgImportDedupedAgainstDeclaringFile(t *testing.T) {
+	src := []byte(`package bar
+
+import "context"
+
+type Holder[T any] interface {
+	Wrap(ctx context.Context, v T) (T, error)
+}
+`)
+	out, err := GenerateRewireMock(src,
+		"Holder", "github.com/example/bar", "bar", "footest",
+		[]string{"context.Context"},
+		map[string]string{"context": "context"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+	t.Log("Generated:\n" + result)
+
+	// "context" must appear exactly once in the import block.
+	count := strings.Count(result, `"context"`)
+	if count != 1 {
+		t.Errorf(`expected exactly one "context" import, got %d\n---\n%s`, count, result)
+	}
+}
+
+// typeArgImports providing a package the test references (which the
+// interface's declaring file does NOT import). The generator must
+// emit the import in the generated mock so the substituted methods
+// compile.
+func TestGenerateRewireMock_TypeArgImportFromTestFile(t *testing.T) {
+	src := []byte(`package bar
+
+type Holder[T any] interface {
+	Get() T
+}
+`)
+	out, err := GenerateRewireMock(src,
+		"Holder", "github.com/example/bar", "bar", "footest",
+		[]string{"time.Duration"},
+		map[string]string{"time": "time"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+	t.Log("Generated:\n" + result)
+
+	if !strings.Contains(result, `"time"`) {
+		t.Errorf(`expected "time" import in generated source\n---\n%s`, result)
+	}
+	if !strings.Contains(result, `time.Duration`) {
+		t.Errorf("expected time.Duration in generated source\n---\n%s", result)
+	}
+}
+
 // Multiple type parameters, e.g. Cache[K comparable, V any]. Verifies
 // that arity > 1 substitution works and produces a struct name
 // disambiguated by both type args.
@@ -199,7 +263,7 @@ type Cache[K comparable, V any] interface {
 	Get(k K) (V, bool)
 }
 `)
-	out, err := GenerateRewireMock(src, "Cache", "github.com/example/bar", "bar", "footest", []string{"string", "int"})
+	out, err := GenerateRewireMock(src, "Cache", "github.com/example/bar", "bar", "footest", []string{"string", "int"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -38,6 +38,30 @@ type genericInstantiations map[string]map[string][][]string
 // Shape: importPath -> targetName -> true.
 type byInstanceTargets map[string]map[string]bool
 
+// mockInstance describes one (interface, type-args) instantiation
+// referenced by a rewire.NewMock[I] call somewhere in the test module.
+// The codegen materializes one backing struct per instance.
+//
+// TypeArgs holds the printed type-argument expressions as the user
+// wrote them in the test file (e.g. ["int"], ["*time.Time", "int"]).
+// Empty/nil for non-generic interfaces.
+//
+// TypeArgImports holds the local-name → import-path resolution for
+// every package selector that appears in the type-arg expressions,
+// derived from the test file's own imports. The codegen uses this to
+// emit the right import declarations in the generated mock file —
+// without it, type args from packages not imported by the interface's
+// declaring file would fail to compile (e.g. Container[time.Duration]
+// references "time", which example/bar/interfaces.go doesn't import).
+//
+// For non-generic instances and instances whose type args reference
+// only builtins or types from the interface's declaring package,
+// TypeArgImports is nil/empty.
+type mockInstance struct {
+	TypeArgs       []string          `json:"typeArgs"`
+	TypeArgImports map[string]string `json:"typeArgImports,omitempty"`
+}
+
 // mockedInterfaces lists interface types referenced by rewire.NewMock[I]
 // calls anywhere in the test module. The toolexec codegen emits a
 // backing struct + factory registration for each one at test compile
@@ -45,20 +69,20 @@ type byInstanceTargets map[string]map[string]bool
 //
 // For generic interfaces, each unique (importPath, ifaceName,
 // type-args) tuple gets its own backing struct, so the value is a
-// list of type-arg combos. Non-generic interfaces store a single
-// nil-or-empty combo.
+// list of mockInstance entries. Non-generic interfaces store a single
+// entry with empty TypeArgs.
 //
-// Shape: importPath -> interface-type-name -> [][]type-arg-source-strings.
+// Shape: importPath -> interface-type-name -> []mockInstance.
 //
 // Examples:
 //
-//	bar.GreeterIface           → mockedIfaces[bar][GreeterIface]   = [[]]
-//	bar.ContainerIface[int]    → mockedIfaces[bar][ContainerIface] = [[int]]
-//	bar.CacheIface[string,int] → mockedIfaces[bar][CacheIface]     = [[string, int]]
+//	bar.GreeterIface           → ifaces[bar][GreeterIface]   = [{TypeArgs: nil}]
+//	bar.ContainerIface[int]    → ifaces[bar][ContainerIface] = [{TypeArgs: [int]}]
+//	bar.CacheIface[string,int] → ifaces[bar][CacheIface]     = [{TypeArgs: [string, int]}]
 //
 // Multiple instantiations of the same interface produce multiple
-// entries: mockedIfaces[bar][ContainerIface] = [[int], [string]].
-type mockedInterfaces map[string]map[string][][]string
+// entries.
+type mockedInterfaces map[string]map[string][]mockInstance
 
 // scanCache is the on-disk cache format written by loadOrScanMockTargets.
 type scanCache struct {
@@ -167,10 +191,10 @@ func scanAllTestFiles(moduleRoot string) (mockTargets, genericInstantiations, by
 		}
 		for pkg, ifaces := range fileMockedIfaces {
 			if mockedIfaces[pkg] == nil {
-				mockedIfaces[pkg] = map[string][][]string{}
+				mockedIfaces[pkg] = map[string][]mockInstance{}
 			}
-			for iface, combos := range ifaces {
-				mockedIfaces[pkg][iface] = append(mockedIfaces[pkg][iface], combos...)
+			for iface, instances := range ifaces {
+				mockedIfaces[pkg][iface] = append(mockedIfaces[pkg][iface], instances...)
 			}
 		}
 		return nil
@@ -217,8 +241,8 @@ func scanAllTestFiles(moduleRoot string) (mockTargets, genericInstantiations, by
 		}
 	}
 	for pkg, ifaces := range mockedIfaces {
-		for iface, combos := range ifaces {
-			mockedIfaces[pkg][iface] = dedupeTypeArgs(combos)
+		for iface, instances := range ifaces {
+			mockedIfaces[pkg][iface] = dedupeMockInstances(instances)
 		}
 	}
 
@@ -235,6 +259,26 @@ func dedupeTypeArgs(combos [][]string) [][]string {
 		}
 		seen[key] = true
 		out = append(out, c)
+	}
+	return out
+}
+
+// dedupeMockInstances dedupes a list of mockInstance entries by their
+// TypeArgs key. When two instances have the same TypeArgs but
+// different TypeArgImports (e.g. two test files with different
+// aliases for the same import path), the first-seen instance wins.
+// In practice this only matters for stdlib aliases that are uniform
+// across test files anyway.
+func dedupeMockInstances(instances []mockInstance) []mockInstance {
+	seen := map[string]bool{}
+	var out []mockInstance
+	for _, inst := range instances {
+		key := strings.Join(inst.TypeArgs, "\x00")
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, inst)
 	}
 	return out
 }
@@ -312,11 +356,14 @@ func scanFileForMockCalls(path string) (mockTargets, genericInstantiations, byIn
 					// preserve AST structure (stripTypeArgs returns
 					// printed strings, not AST nodes).
 					if idx, ok := call.Fun.(*ast.IndexExpr); ok {
-						if importPath, typeName, typeArgs := extractInterfaceRef(idx.Index, imports, fset); importPath != "" {
+						if importPath, typeName, typeArgs, typeArgImports := extractInterfaceRef(idx.Index, imports, fset); importPath != "" {
 							if mockedIfaces[importPath] == nil {
-								mockedIfaces[importPath] = map[string][][]string{}
+								mockedIfaces[importPath] = map[string][]mockInstance{}
 							}
-							mockedIfaces[importPath][typeName] = append(mockedIfaces[importPath][typeName], typeArgs)
+							mockedIfaces[importPath][typeName] = append(mockedIfaces[importPath][typeName], mockInstance{
+								TypeArgs:       typeArgs,
+								TypeArgImports: typeArgImports,
+							})
 						}
 					}
 					return true
@@ -376,35 +423,86 @@ func scanFileForMockCalls(path string) (mockTargets, genericInstantiations, byIn
 }
 
 // extractInterfaceRef resolves an expression used as a type argument
-// to rewire.NewMock into (importPath, typeName, typeArgs). Handles:
+// to rewire.NewMock into (importPath, typeName, typeArgs,
+// typeArgImports). Handles:
 //
-//	pkg.Iface         → ("github.com/.../pkg", "Iface", nil)
-//	pkg.Iface[T]      → ("github.com/.../pkg", "Iface", ["T"])
-//	pkg.Iface[T, U]   → ("github.com/.../pkg", "Iface", ["T", "U"])
+//	pkg.Iface         → ("github.com/.../pkg", "Iface", nil, nil)
+//	pkg.Iface[T]      → ("github.com/.../pkg", "Iface", ["T"], imports-for-T)
+//	pkg.Iface[T, U]   → ("github.com/.../pkg", "Iface", ["T", "U"], imports-for-T-and-U)
 //
 // The typeArgs slice contains each type argument as a printed Go
 // source string (e.g. "int", "*time.Time", "context.Context"), in the
-// order the user wrote them. Non-generic forms return a nil typeArgs.
+// order the user wrote them. Non-generic forms return nil typeArgs.
 //
-// Returns "", "", nil if the expression isn't a recognized
+// typeArgImports maps any package selectors mentioned in the type
+// args to their import paths, resolved through the test file's own
+// imports. This lets the codegen emit correct import declarations
+// in the generated mock file even when the interface's declaring
+// file doesn't import the same packages. Empty/nil if the type args
+// reference only builtins or types from the interface's declaring
+// package.
+//
+// Returns ("", "", nil, nil) if the expression isn't a recognized
 // package-qualified identifier or generic instantiation thereof.
-func extractInterfaceRef(expr ast.Expr, imports map[string]string, fset *token.FileSet) (importPath, typeName string, typeArgs []string) {
+func extractInterfaceRef(expr ast.Expr, imports map[string]string, fset *token.FileSet) (importPath, typeName string, typeArgs []string, typeArgImports map[string]string) {
 	// Strip an outer IndexExpr / IndexListExpr to peel the type-arg
 	// brackets off, leaving the bare pkg.Iface SelectorExpr.
 	inner, args := stripTypeArgs(expr, fset)
 	sel, ok := inner.(*ast.SelectorExpr)
 	if !ok {
-		return "", "", nil
+		return "", "", nil, nil
 	}
 	pkgIdent, ok := sel.X.(*ast.Ident)
 	if !ok {
-		return "", "", nil
+		return "", "", nil, nil
 	}
 	importPath, ok = imports[pkgIdent.Name]
 	if !ok {
-		return "", "", nil
+		return "", "", nil, nil
 	}
-	return importPath, sel.Sel.Name, args
+
+	// Walk the type-arg subtrees looking for package selectors and
+	// resolve them via the test file's import map.
+	if len(args) > 0 {
+		typeArgImports = map[string]string{}
+		switch idx := expr.(type) {
+		case *ast.IndexExpr:
+			collectTypeArgPkgRefs(idx.Index, imports, typeArgImports)
+		case *ast.IndexListExpr:
+			for _, ix := range idx.Indices {
+				collectTypeArgPkgRefs(ix, imports, typeArgImports)
+			}
+		}
+		// The interface's own package alias is already going to be
+		// imported by the generator (it's interfacePkgAlias). No need
+		// to duplicate it here, but it doesn't hurt either — leave it.
+		if len(typeArgImports) == 0 {
+			typeArgImports = nil
+		}
+	}
+
+	return importPath, sel.Sel.Name, args, typeArgImports
+}
+
+// collectTypeArgPkgRefs walks a type-argument expression and records
+// (local-name → import-path) for any package selectors found, using
+// the test file's import map for resolution. The result is merged
+// into out (so callers can accumulate across multiple type args).
+func collectTypeArgPkgRefs(expr ast.Expr, fileImports, out map[string]string) {
+	ast.Inspect(expr, func(n ast.Node) bool {
+		sel, ok := n.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		ident, ok := sel.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		if path, ok := fileImports[ident.Name]; ok {
+			out[ident.Name] = path
+		}
+		return true
+	})
 }
 
 func exprSource(expr ast.Expr, fset *token.FileSet) string {
