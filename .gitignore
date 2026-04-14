@@ -17,3 +17,7 @@ site/
 # OS
 .DS_Store
 Thumbs.db
+
+# benchmark binaries built from scripts/benchtool
+/benchtool
+/genbench

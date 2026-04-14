@@ -47,8 +47,12 @@ func Run(args []string) int {
 		return execTool(tool, toolArgs)
 	}
 
+	defer profileStage("compile-wrap", pkgPath)()
+
 	// Load the set of functions to mock (scanned from test files)
+	scanDone := profileStage("scan", "")
 	targets, instantiations, byInstance, _ := loadOrScanMockTargets(moduleRoot)
+	scanDone()
 
 	funcsToMock := targets[pkgPath]
 	pkgByInstance := byInstance[pkgPath]
@@ -137,6 +141,7 @@ func findFlag(args []string, flag string) string {
 // rewriteCompileArgs rewrites only the specific functions listed in funcsToMock.
 // For test compilations, it generates a registration file directly from targets.
 func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, pkgByInstance map[string]bool, isTest bool, allTargets mockTargets, allInstantiations genericInstantiations, allByInstance byInstanceTargets) ([]string, func(), error) {
+	defer profileStage("rewrite-compile-args", pkgPath)()
 	tmpDir, err := os.MkdirTemp("", "rewire-*")
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating temp dir: %w", err)
@@ -310,6 +315,7 @@ func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, pkg
 // struct types, distinct factory keys, distinct per-instance dispatch
 // tables.
 func generateInterfaceMocks(compileArgs []string, tmpDir string) ([]string, func(), error) {
+	defer profileStage("iface-mock-gen", "")()
 	// Walk the test files in this compile and collect mocked interface refs.
 	pkgMockedIfaces := mockedInterfaces{}
 	pkgName := ""
@@ -454,6 +460,8 @@ func resolvePackageDir(importPath string) (string, error) {
 }
 
 func resolvePackageDirUncached(importPath string) (string, error) {
+	defer profileStage("resolve-pkg-dir", importPath)()
+
 	// Stdlib fast path: go/build resolves these without subprocess
 	// overhead. Detect by asking go/build for the package and checking
 	// pkg.Goroot — if set, it's in $GOROOT/src and no replace/vendor

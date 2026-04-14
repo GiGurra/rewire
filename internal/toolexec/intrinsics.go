@@ -6,6 +6,25 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
+)
+
+// intrinsicsCache memoizes intrinsicFunctions() within a single
+// toolexec process. The underlying work is expensive:
+//
+//   - `go env GOROOT` subprocess (~20ms)
+//   - read + regex-parse the compiler's intrinsics.go (~5-15ms)
+//
+// Without caching, isIntrinsic calls this once per mocked function
+// per compile invocation — in the loops at toolexec.go:59 and :668 —
+// which scales linearly with the number of mocked functions and the
+// number of compile steps. Cross-process caching isn't needed here;
+// each toolexec invocation is short enough that one parse amortizes
+// across all the isIntrinsic calls inside it, and intrinsics don't
+// change within a build.
+var (
+	intrinsicsOnce sync.Once
+	intrinsicsData map[string]map[string]bool
 )
 
 // intrinsicFunctions returns the set of functions that the Go compiler
@@ -14,19 +33,21 @@ import (
 // bypassing any wrapper we generate.
 //
 // The list is parsed from $GOROOT/src/cmd/compile/internal/ssagen/intrinsics.go.
+// Result is memoized for the lifetime of the toolexec process.
 func intrinsicFunctions() map[string]map[string]bool {
-	goroot := goroot()
-	if goroot == "" {
-		return nil
-	}
-
-	path := filepath.Join(goroot, "src", "cmd", "compile", "internal", "ssagen", "intrinsics.go")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-
-	return parseIntrinsics(string(data))
+	intrinsicsOnce.Do(func() {
+		goroot := goroot()
+		if goroot == "" {
+			return
+		}
+		path := filepath.Join(goroot, "src", "cmd", "compile", "internal", "ssagen", "intrinsics.go")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return
+		}
+		intrinsicsData = parseIntrinsics(string(data))
+	})
+	return intrinsicsData
 }
 
 // goroot returns the GOROOT path by running `go env GOROOT`.
