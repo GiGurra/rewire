@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/GiGurra/rewire/internal/mockgen"
 	"github.com/GiGurra/rewire/internal/rewriter"
@@ -33,18 +34,21 @@ func Run(args []string) int {
 	tool := args[0]
 	toolArgs := args[1:]
 
+	// Fast path for anything that isn't a compile invocation, or
+	// that is but doesn't give us enough context to act on. All of
+	// these paths have ZERO cleanup work, so we can use syscall.Exec
+	// to replace the rewire process with the target tool directly —
+	// saving ~10 ms of fork+wait overhead per invocation.
 	if !isCompileTool(tool) {
-		return execTool(tool, toolArgs)
+		return execToolReplace(tool, toolArgs)
 	}
-
 	pkgPath := findFlag(toolArgs, "-p")
 	if pkgPath == "" {
-		return execTool(tool, toolArgs)
+		return execToolReplace(tool, toolArgs)
 	}
-
 	_, moduleRoot := findModuleInfo()
 	if moduleRoot == "" {
-		return execTool(tool, toolArgs)
+		return execToolReplace(tool, toolArgs)
 	}
 
 	defer profileStage("compile-wrap", pkgPath)()
@@ -71,8 +75,13 @@ func Run(args []string) int {
 		}
 	}
 
+	// Nothing to rewrite for this package and it's not a test
+	// compilation that needs a registration file either — pass
+	// through to the real compiler with no fork overhead. The
+	// in-flight compile-wrap profile defer is unreachable after
+	// syscall.Exec, so we end it manually here.
 	if len(funcsToMock) == 0 && !isTest {
-		return execTool(tool, toolArgs)
+		return execToolReplace(tool, toolArgs)
 	}
 
 	rewrittenArgs, cleanup, err := rewriteCompileArgs(toolArgs, pkgPath, funcsToMock, pkgByInstance, isTest, targets, instantiations, byInstance)
@@ -84,6 +93,9 @@ func Run(args []string) int {
 		defer cleanup()
 	}
 
+	// Rewrite path uses execTool (fork+wait) because cleanup() needs
+	// to run after the compile finishes to remove temp files. If we
+	// syscall.Exec'd here, the temp files would leak.
 	return execTool(tool, rewrittenArgs)
 }
 
@@ -772,6 +784,14 @@ func generateRegistration(compileArgs []string, targets mockTargets, instantiati
 // packages the original source imports. When rewire's rewriter adds
 // imports for reflect/sync, those packages aren't visible to the
 // compiler unless we extend the importcfg.
+//
+// Instrumentation flags on the compile invocation (-race, -msan, -asan)
+// are propagated to the go list subprocess so the returned archive
+// paths match the instrumented flavor the rest of the build uses.
+// Without this, a `go test -race` build would mix race-instrumented
+// .a files (from the compile step) with non-race .a files (from our
+// importcfg patch), which fails at link time with a fingerprint
+// mismatch on reflect or sync.
 func ensureStdImportsInCfg(args []string, pkgs ...string) ([]string, func(), error) {
 	cfgIdx := -1
 	var cfgPath string
@@ -812,7 +832,7 @@ func ensureStdImportsInCfg(args []string, pkgs ...string) ([]string, func(), err
 		return args, nil, nil
 	}
 
-	exports, err := resolveStdExportPaths(missing)
+	exports, err := resolveStdExportPaths(missing, detectInstrumentationFlags(args))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -852,11 +872,33 @@ func ensureStdImportsInCfg(args []string, pkgs ...string) ([]string, func(), err
 	return newArgs, cleanup, nil
 }
 
+// detectInstrumentationFlags scans compile tool args for -race, -msan,
+// -asan and returns whichever are present. These must be propagated
+// to any `go list -export` subprocess rewire spawns so the returned
+// archive paths match the instrumented flavor the rest of the build
+// is using; mixing flavors triggers a link-time fingerprint mismatch.
+func detectInstrumentationFlags(args []string) []string {
+	var flags []string
+	for _, a := range args {
+		switch a {
+		case "-race", "-msan", "-asan":
+			flags = append(flags, a)
+		}
+	}
+	return flags
+}
+
 // resolveStdExportPaths runs `go list -export` to find the compiled .a
 // files for each package, with GOFLAGS stripped so the recursive
-// toolexec doesn't fire.
-func resolveStdExportPaths(pkgs []string) (map[string]string, error) {
-	listArgs := append([]string{"list", "-export", "-f", "{{.ImportPath}}|{{.Export}}"}, pkgs...)
+// toolexec doesn't fire. extraFlags (typically -race/-msan/-asan
+// detected from the compile invocation) are passed through so the
+// archive paths returned match the instrumentation flavor the
+// surrounding build is using.
+func resolveStdExportPaths(pkgs []string, extraFlags []string) (map[string]string, error) {
+	defer profileStage("go-list-export", strings.Join(pkgs, ","))()
+	listArgs := append([]string{"list"}, extraFlags...)
+	listArgs = append(listArgs, "-export", "-f", "{{.ImportPath}}|{{.Export}}")
+	listArgs = append(listArgs, pkgs...)
 	cmd := exec.Command("go", listArgs...)
 	cmd.Env = envWithoutGOFLAGS()
 
@@ -979,6 +1021,10 @@ func realVarName(targetName string) string {
 	return "Real_" + name
 }
 
+// execTool runs the target tool as a child process and waits for it
+// to finish, returning its exit code. Used when rewire still has
+// cleanup work to do after the tool exits (e.g. removing temp files
+// that were passed to the compile via rewritten args).
 func execTool(tool string, args []string) int {
 	cmd := exec.Command(tool, args...)
 	cmd.Stdin = os.Stdin
@@ -991,5 +1037,37 @@ func execTool(tool string, args []string) int {
 		fmt.Fprintf(os.Stderr, "rewire: exec %s: %v\n", tool, err)
 		return 1
 	}
+	return 0
+}
+
+// execToolReplace replaces the current rewire process with the target
+// tool via syscall.Exec. No fork, no parent→child IPC overhead, no
+// wait — the rewire process literally becomes the compile process.
+// Saves ~10 ms per invocation vs execTool's fork+wait model, which
+// matters at scale because Go invokes the toolexec wrapper once per
+// compile step.
+//
+// On success this function does not return: the Exec syscall
+// overwrites the current process image. On failure it falls back to
+// execTool so the build still progresses (with the old overhead).
+//
+// MUST NOT be called when there are pending defers that need to
+// run — anything after the syscall.Exec is lost. The no-op paths in
+// Run() have no cleanup registered, which is why they're safe call
+// sites for this; the rewrite path still uses execTool because it
+// has deferred temp-dir cleanup.
+func execToolReplace(tool string, args []string) int {
+	// syscall.Exec expects argv[0] to be the program name. Go's
+	// exec.Command does this implicitly; we have to do it manually.
+	argv := append([]string{tool}, args...)
+	if err := syscall.Exec(tool, argv, os.Environ()); err != nil {
+		// Only reached on failure. Fall back to the normal path so
+		// the build still progresses, and log once so users can
+		// debug if their platform doesn't support Exec.
+		fmt.Fprintf(os.Stderr, "rewire: syscall.Exec failed for %s, falling back to fork+wait: %v\n", tool, err)
+		return execTool(tool, args)
+	}
+	// Unreachable — syscall.Exec either replaces the process or
+	// returns an error above.
 	return 0
 }

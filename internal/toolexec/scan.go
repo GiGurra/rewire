@@ -100,33 +100,51 @@ type scanCache struct {
 // of interface types referenced by rewire.NewMock[I] for which the
 // codegen should emit a backing struct.
 //
-// Results are cached per build session (keyed on parent PID). A file lock
-// ensures only one toolexec process scans; others block until the cache
-// is ready.
+// Results are cached per build session (keyed on parent PID). Reads
+// are **lock-free**: once the cache file exists, any rewire process
+// can open and decode it without touching the flock. Writes are
+// atomic (temp file + rename) so readers always see either the old
+// or the new snapshot, never a partial one. Only the first
+// process-to-arrive takes the lock to scan + write.
+//
+// This matters because Go's build system runs compile invocations
+// in parallel (GOMAXPROCS wide), so dozens of rewire processes can
+// be contending for the same cache file within milliseconds of each
+// other. An exclusive flock on the read path serializes them and
+// adds measurable overhead; a lock-free read lets them all proceed
+// in parallel.
 func loadOrScanMockTargets(moduleRoot string) (mockTargets, genericInstantiations, byInstanceTargets, mockedInterfaces) {
 	cacheDir := filepath.Join(os.TempDir(), fmt.Sprintf("rewire-%d", os.Getppid()))
 	cacheFile := filepath.Join(cacheDir, "mock_targets.json")
 	lockPath := filepath.Join(cacheDir, "mock_targets.lock")
 
-	_ = os.MkdirAll(cacheDir, 0755)
+	// Fast path: lock-free cache read. If the file exists and
+	// decodes cleanly, return immediately — no lock acquired, no
+	// serialization against other parallel readers.
+	if cache, ok := readScanCacheFile(cacheFile); ok {
+		return cache.Targets, cache.Instantiations, cache.ByInstance, cache.MockedInterfaces
+	}
 
-	// Acquire file lock — first process scans, others wait
+	// Slow path: cache doesn't exist (or failed to decode). We
+	// need to either scan ourselves or wait for another process to
+	// scan. Acquire the lock to serialize competing scanners.
+	_ = os.MkdirAll(cacheDir, 0755)
 	fl := flock.New(lockPath)
 	if err := fl.Lock(); err != nil {
-		// Can't acquire lock — fall back to scanning without lock
+		// Can't acquire lock — fall back to scanning without lock.
+		// A race here is harmless: multiple processes would scan,
+		// but they'd all produce the same answer.
 		return scanAllTestFiles(moduleRoot)
 	}
 	defer func() { _ = fl.Unlock() }()
 
-	// Under lock: check if cache was written by another process
-	if data, err := os.ReadFile(cacheFile); err == nil {
-		var cache scanCache
-		if json.Unmarshal(data, &cache) == nil && cache.Targets != nil {
-			return cache.Targets, cache.Instantiations, cache.ByInstance, cache.MockedInterfaces
-		}
+	// Under the lock, another process may have written the cache
+	// while we were waiting. Re-check before scanning.
+	if cache, ok := readScanCacheFile(cacheFile); ok {
+		return cache.Targets, cache.Instantiations, cache.ByInstance, cache.MockedInterfaces
 	}
 
-	// We're the first — scan and write cache
+	// We're the first — scan and write cache atomically.
 	targets, insts, byInst, mockedIfaces := scanAllTestFiles(moduleRoot)
 
 	cache := scanCache{
@@ -135,11 +153,49 @@ func loadOrScanMockTargets(moduleRoot string) (mockTargets, genericInstantiation
 		ByInstance:       byInst,
 		MockedInterfaces: mockedIfaces,
 	}
-	if data, err := json.Marshal(cache); err == nil {
-		_ = os.WriteFile(cacheFile, data, 0644)
-	}
+	writeScanCacheFile(cacheFile, cache)
 
 	return targets, insts, byInst, mockedIfaces
+}
+
+// readScanCacheFile tries to read and unmarshal the cache file at
+// path. Returns the decoded cache and `true` on success, or `zero,
+// false` if the file is missing, unreadable, or malformed. Safe to
+// call concurrently from many processes — a partial write from the
+// writer process can't be observed because writeScanCacheFile uses
+// temp+rename.
+func readScanCacheFile(path string) (scanCache, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return scanCache{}, false
+	}
+	var cache scanCache
+	if err := json.Unmarshal(data, &cache); err != nil {
+		return scanCache{}, false
+	}
+	if cache.Targets == nil {
+		return scanCache{}, false
+	}
+	return cache, true
+}
+
+// writeScanCacheFile marshals cache to JSON and writes it to path
+// atomically via temp + rename. Callers should hold the scan lock;
+// the atomicity here is about making sure readers never observe a
+// half-written file, not about serializing writers.
+func writeScanCacheFile(path string, cache scanCache) {
+	data, err := json.Marshal(cache)
+	if err != nil {
+		return
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return
+	}
+	// Rename is atomic on POSIX filesystems: readers will see
+	// either the old file (including "no file") or the complete
+	// new file, never a partial write.
+	_ = os.Rename(tmp, path)
 }
 
 // scanAllTestFiles walks the module and finds all rewire.{Func,Real,Restore,

@@ -271,7 +271,7 @@ Rewire ships a Go benchmark harness at `scripts/benchtool/` with three subcomman
 
 What we measure is **compile time**, not test runtime: `-run ^$` matches no tests so nothing executes, but the full compile + link pipeline runs (which is where rewire's toolexec does its work). That's the right measurement because test runtimes don't change between modes, so including them just adds noise, and tests that rely on the toolexec at runtime (e.g. `NewMock` factories) can't pass in baseline mode at all.
 
-### Scaling result at 10% mock density (pessimistic)
+### Scaling result at 10% mock density
 
 Cold-compile benchmarks against synthetic modules with **10% mock density** — every 10th package contains `rewire.Func` + `rewire.NewMock` calls, the rest are plain Go. Apple Silicon, Go 1.26.2, 3 timed iterations per size after a pre-warm run:
 
@@ -303,20 +303,44 @@ This looks contradictory but isn't — they measure different things. The ratio 
 
 Both numbers are consistent with the same linear fit. A super-linear term would make per-pkg overhead *increase* with N, which is the opposite of what we see.
 
-### Typical-density projects look much better
+### Where the overhead actually comes from
 
-10% mock density is deliberately pessimistic: every tenth package is actively mocking things. Real Go projects usually have **much lower** density — maybe 1-2% of packages reference `rewire.*` at all. The 0.113 s/pkg weighted overhead breaks down as:
+Bisecting rewire's per-invocation work reveals an important property: **almost none of the measurable overhead is in rewire's own code**. A level-by-level measurement at N=25:
 
-```
-0.113 ≈ 0.9 × no-op-wrapper-cost  +  0.1 × mock-heavy-cost
-     ≈ 0.9 × ~0.030               +  0.1 × ~0.855
-```
+| Short-circuit point                                    | Wall time |
+|--------------------------------------------------------|----------:|
+| Skip everything — immediate `syscall.Exec`             |    5.22 s |
+| + findModuleInfo                                        |    5.28 s |
+| + scan-cache read                                       |    5.34 s |
+| + target/byInstance/isTest lookups                      |    5.40 s |
+| Full rewire work, **drop rewritten args**, use originals |    5.27 s |
+| Full rewire work, use rewritten args (syscall.Exec)    |    8.15 s |
+| **Full flow**                                          |    8.25 s |
 
-At **1% mock density**, the weighted overhead would be:
+The jump from "drop rewritten args" (5.27 s) to "use rewritten args" (8.15 s) is nearly the entire overhead. Rewire's own work — scanning, rewriting, generating interface mock files, patching importcfg — costs essentially nothing. The overhead is in **the Go compiler processing the extra source code that rewire adds to test compilations**.
 
-```
-weighted = 0.99 × 0.030 + 0.01 × 0.855
-         ≈ 0.038 s/pkg
+Each mocked interface produces a ~35-line backing-struct file (type declarations + per-method `sync.Map`-backed dispatch + `init()` that registers the factory). Each test package that references `rewire.Func` produces a ~15-line registration file. For the synthetic N=25 benchmark with 3 mock-heavy test packages, that's ~150 lines of extra Go per compile, compiled once per affected test binary. The Go compiler has a real per-file fixed cost for parse + type-check + codegen, and it adds up.
+
+### This cost is not unique to rewire
+
+**Any mocking library that produces Go code pays this exact compile cost.** `mockery`, `gomock`, `moq`, `counterfeiter` — they all generate backing structs with method implementations. The only difference is *where* the cost lands:
+
+- **Code-generator tools commit their output to disk.** The generated mock files live alongside your source, and their compile cost is folded into your "normal" build time. It's invisible because it's always there.
+- **Rewire generates on the fly** during the build. The same cost shows up as a delta between `go test` and `go test -toolexec=rewire`, which makes it look like "rewire overhead" when it's really "the cost of compiling mock code."
+
+A fair comparison isn't "rewire vs no-rewire" — it's **"any mocking library at this mock density vs a codebase with no mocks at all."** Under that framing, rewire's ~0.1 s per mocked test package is the structural cost of the feature, not an implementation inefficiency.
+
+The upside of rewire's on-the-fly approach is that the generated code **doesn't clutter your repo** — no `mock_*.go` files to commit, review, or keep in sync when interfaces change. The downside is that the cost is visible in `go test` wall-clock time the first time you measure it. Both approaches compile the same amount of Go.
+
+### Typical-density projects
+
+10% mock density is fairly representative of a test-heavy Go codebase: if most test packages use mocks, 10% of the module's compile work is mock-related. Real projects vary:
+
+- **Mock-heavy**: 20-40% of packages have mock-using tests. Ratio in the 1.6×-2.0× range (mostly the fundamental mock-compile cost described above).
+- **Typical**: 5-15% of packages. Ratio 1.3×-1.6×.
+- **Sparse**: <5%. Ratio <1.3×, sometimes barely measurable.
+
+All of these are for **cold-cache** compiles. Incremental rebuilds (the normal TDD loop) bypass toolexec entirely for cached packages, so the overhead is **essentially zero** — see the warm-cache section below. The ratio only matters on the first full rebuild after a `go clean -cache`.
 ```
 
 Plugging into the ratio formula, the asymptotic ratio drops from ~1.96× (dense) to:
@@ -353,20 +377,11 @@ Instrumented stages: `scan` (test-file scanner pass, cached on disk per build), 
 
 ### Caches and amortization
 
-Rewire carries a few caches that bring total cost down from "naive" to "linear":
+Rewire carries a few caches that keep the toolexec wrapper's own cost well below noise:
 
-- **Scan cache.** `scanAllTestFiles` walks every `_test.go` in the module and parses each once. The result is cached on disk at `$TMPDIR/rewire-<ppid>/mock_targets.json` under a file lock. Only the first toolexec invocation in a build pays the walk+parse cost; every subsequent invocation reads the JSON and moves on.
-- **Intrinsic function table.** The compiler's `intrinsics.go` is parsed once per toolexec process (not per `isIntrinsic()` call) via `sync.Once`. Without this cache, a package with N mocked functions would re-read and re-regex the intrinsics file N times per compile invocation.
+- **Scan cache.** `scanAllTestFiles` walks every `_test.go` in the module and parses each once. The result is cached on disk at `$TMPDIR/rewire-<ppid>/mock_targets.json`. Reads are lock-free (the cache file is written atomically via temp + rename), so parallel toolexec processes don't serialize on it. Only the first toolexec invocation in a build pays the walk+parse cost; every subsequent invocation reads the JSON directly and moves on.
+- **Intrinsic function table.** The compiler's `intrinsics.go` is parsed once per toolexec process via `sync.Once`. Without this cache, a package with N mocked functions would re-read and re-regex the intrinsics file N times per compile invocation.
 - **Package directory cache.** `resolvePackageDir` memoizes `go list -find` results in an in-process `sync.Map`, so a compile step that mocks several interfaces from the same package shells out once per package path, not once per interface.
+- **No-op fast path.** Compile invocations for packages that don't need any rewire work (non-compile tools, missing `-p` flag, no module context, no mocked functions and not a test binary) use `syscall.Exec` to replace the rewire process with the real compiler directly — no fork+wait, no parent process waiting for a child. On macOS this saves roughly 1 ms per invocation; on Linux the savings are similar.
 
-All three caches are strictly additive — they make things faster without changing semantics. None of them persist across build invocations except the scan cache (which keys on parent PID, so each `go test` gets its own cache entry).
-
-### What we deliberately don't do (yet)
-
-- **Parallelizing the scanner file-walk.** The scan cost is bounded to a fixed ~50-200 ms once per build (cached on disk for subsequent toolexec invocations), dwarfed by the ~0.12 s × N per-package term. Parallelizing it would cut tens of milliseconds off the one-time cost and require a mutex around result merging. Not worth the complexity.
-- **Persisting the package-dir cache across toolexec processes.** Each toolexec invocation starts with a fresh in-process cache, so the same package gets resolved up to `N` times across a full build. In practice `go list` is fast (~20 ms cached by the module graph) and the set of mocked packages is small, so the savings don't justify another file-locked JSON cache.
-- **Parallelizing interface mock generation within a single compile.** A compile that touches more than a handful of mocked interfaces is rare, so the win is bounded.
-
-### What's on the table for future optimization
-
-The biggest unexploited lever is the **no-op wrapper path**. 90% of packages in our benchmark (and a much larger fraction in typical projects) go through rewire's toolexec wrapper only to conclude "no mock targets here, pass through to the real compiler." Each no-op wrapper pays ~30 ms for fork+exec of the rewire binary, loading the scan-cache JSON, and dispatching. If we could short-circuit the no-op case via a much tighter data format — say an envvar-embedded bitmap or a minimal lookup file — we could cut ~20 ms per no-op package, which at large N directly reduces the asymptotic ratio. Not currently implemented; filed as a potential optimization target.
+These optimizations collectively keep the per-invocation wrapper cost under 1 ms, which is why the bisection table above shows essentially no gap between "full rewire work" and "baseline" — rewire's own code is not the bottleneck. The compile cost of the generated mock source *is*, and it's fundamental to having mocks at all.
