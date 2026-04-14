@@ -43,8 +43,22 @@ type byInstanceTargets map[string]map[string]bool
 // backing struct + factory registration for each one at test compile
 // time, eliminating the go:generate / committed-mock-file workflow.
 //
-// Shape: importPath -> interface-type-name -> true.
-type mockedInterfaces map[string]map[string]bool
+// For generic interfaces, each unique (importPath, ifaceName,
+// type-args) tuple gets its own backing struct, so the value is a
+// list of type-arg combos. Non-generic interfaces store a single
+// nil-or-empty combo.
+//
+// Shape: importPath -> interface-type-name -> [][]type-arg-source-strings.
+//
+// Examples:
+//
+//	bar.GreeterIface           → mockedIfaces[bar][GreeterIface]   = [[]]
+//	bar.ContainerIface[int]    → mockedIfaces[bar][ContainerIface] = [[int]]
+//	bar.CacheIface[string,int] → mockedIfaces[bar][CacheIface]     = [[string, int]]
+//
+// Multiple instantiations of the same interface produce multiple
+// entries: mockedIfaces[bar][ContainerIface] = [[int], [string]].
+type mockedInterfaces map[string]map[string][][]string
 
 // scanCache is the on-disk cache format written by loadOrScanMockTargets.
 type scanCache struct {
@@ -153,10 +167,10 @@ func scanAllTestFiles(moduleRoot string) (mockTargets, genericInstantiations, by
 		}
 		for pkg, ifaces := range fileMockedIfaces {
 			if mockedIfaces[pkg] == nil {
-				mockedIfaces[pkg] = map[string]bool{}
+				mockedIfaces[pkg] = map[string][][]string{}
 			}
-			for iface := range ifaces {
-				mockedIfaces[pkg][iface] = true
+			for iface, combos := range ifaces {
+				mockedIfaces[pkg][iface] = append(mockedIfaces[pkg][iface], combos...)
 			}
 		}
 		return nil
@@ -174,8 +188,10 @@ func scanAllTestFiles(moduleRoot string) (mockTargets, genericInstantiations, by
 		filteredTargets := targets[pkg][:0]
 		for _, name := range targets[pkg] {
 			typeName, _, isMethod := parseTargetName(name)
-			if isMethod && ifaces[typeName] {
-				continue // skip — handled by codegen
+			if isMethod {
+				if _, isMockedIface := ifaces[typeName]; isMockedIface {
+					continue // skip — handled by codegen
+				}
 			}
 			filteredTargets = append(filteredTargets, name)
 		}
@@ -183,8 +199,10 @@ func scanAllTestFiles(moduleRoot string) (mockTargets, genericInstantiations, by
 		if byInst[pkg] != nil {
 			for name := range byInst[pkg] {
 				typeName, _, isMethod := parseTargetName(name)
-				if isMethod && ifaces[typeName] {
-					delete(byInst[pkg], name)
+				if isMethod {
+					if _, isMockedIface := ifaces[typeName]; isMockedIface {
+						delete(byInst[pkg], name)
+					}
 				}
 			}
 		}
@@ -196,6 +214,11 @@ func scanAllTestFiles(moduleRoot string) (mockTargets, genericInstantiations, by
 	for pkg, byFunc := range insts {
 		for fn, combos := range byFunc {
 			insts[pkg][fn] = dedupeTypeArgs(combos)
+		}
+	}
+	for pkg, ifaces := range mockedIfaces {
+		for iface, combos := range ifaces {
+			mockedIfaces[pkg][iface] = dedupeTypeArgs(combos)
 		}
 	}
 
@@ -271,25 +294,30 @@ func scanFileForMockCalls(path string) (mockTargets, genericInstantiations, byIn
 			return true
 		}
 
-		// rewire.NewMock[I] is an IndexExpr (or IndexListExpr for
-		// multi-type-param generic interfaces in a future phase),
-		// wrapping rewire.NewMock and carrying I as its index.
+		// rewire.NewMock[I] is an IndexExpr wrapping rewire.NewMock and
+		// carrying I as its index. The interface I can be:
+		//
+		//   pkg.Iface             — non-generic interface
+		//   pkg.Iface[T]          — generic interface, single type arg
+		//   pkg.Iface[T, U]       — generic interface, multiple type args
+		//
+		// For non-generic interfaces I is a SelectorExpr. For generic
+		// instantiations I is itself an IndexExpr or IndexListExpr
+		// wrapping a SelectorExpr. extractInterfaceRef handles all three.
 		if inner, idxArgs := stripTypeArgs(call.Fun, fset); len(idxArgs) > 0 {
 			if sel, ok := inner.(*ast.SelectorExpr); ok {
 				if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == rewireLocalName && sel.Sel.Name == "NewMock" {
-					// Re-parse the type argument as a selector expression
-					// (pkg.Iface) since stripTypeArgs returned it as a string.
-					// Walk the IndexExpr's Index directly to get the AST.
-					switch idx := call.Fun.(type) {
-					case *ast.IndexExpr:
-						if importPath, typeName := extractInterfaceRef(idx.Index, imports); importPath != "" {
+					// The type argument expression lives in the
+					// outer IndexExpr's Index slot. Walk it directly to
+					// preserve AST structure (stripTypeArgs returns
+					// printed strings, not AST nodes).
+					if idx, ok := call.Fun.(*ast.IndexExpr); ok {
+						if importPath, typeName, typeArgs := extractInterfaceRef(idx.Index, imports, fset); importPath != "" {
 							if mockedIfaces[importPath] == nil {
-								mockedIfaces[importPath] = map[string]bool{}
+								mockedIfaces[importPath] = map[string][][]string{}
 							}
-							mockedIfaces[importPath][typeName] = true
+							mockedIfaces[importPath][typeName] = append(mockedIfaces[importPath][typeName], typeArgs)
 						}
-					case *ast.IndexListExpr:
-						// Future: generic interfaces. For now ignore.
 					}
 					return true
 				}
@@ -347,24 +375,36 @@ func scanFileForMockCalls(path string) (mockTargets, genericInstantiations, byIn
 	return targets, insts, byInst, mockedIfaces
 }
 
-// extractInterfaceRef resolves an expression like `bar.GreeterIface`
-// used as a type argument to rewire.NewMock into (importPath,
-// typeName). Returns ("","") if the expression isn't a recognized
-// package-qualified identifier.
-func extractInterfaceRef(expr ast.Expr, imports map[string]string) (string, string) {
-	sel, ok := expr.(*ast.SelectorExpr)
+// extractInterfaceRef resolves an expression used as a type argument
+// to rewire.NewMock into (importPath, typeName, typeArgs). Handles:
+//
+//	pkg.Iface         → ("github.com/.../pkg", "Iface", nil)
+//	pkg.Iface[T]      → ("github.com/.../pkg", "Iface", ["T"])
+//	pkg.Iface[T, U]   → ("github.com/.../pkg", "Iface", ["T", "U"])
+//
+// The typeArgs slice contains each type argument as a printed Go
+// source string (e.g. "int", "*time.Time", "context.Context"), in the
+// order the user wrote them. Non-generic forms return a nil typeArgs.
+//
+// Returns "", "", nil if the expression isn't a recognized
+// package-qualified identifier or generic instantiation thereof.
+func extractInterfaceRef(expr ast.Expr, imports map[string]string, fset *token.FileSet) (importPath, typeName string, typeArgs []string) {
+	// Strip an outer IndexExpr / IndexListExpr to peel the type-arg
+	// brackets off, leaving the bare pkg.Iface SelectorExpr.
+	inner, args := stripTypeArgs(expr, fset)
+	sel, ok := inner.(*ast.SelectorExpr)
 	if !ok {
-		return "", ""
+		return "", "", nil
 	}
 	pkgIdent, ok := sel.X.(*ast.Ident)
 	if !ok {
-		return "", ""
+		return "", "", nil
 	}
-	importPath, ok := imports[pkgIdent.Name]
+	importPath, ok = imports[pkgIdent.Name]
 	if !ok {
-		return "", ""
+		return "", "", nil
 	}
-	return importPath, sel.Sel.Name
+	return importPath, sel.Sel.Name, args
 }
 
 func exprSource(expr ast.Expr, fset *token.FileSet) string {

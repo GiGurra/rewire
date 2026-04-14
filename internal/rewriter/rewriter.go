@@ -67,6 +67,21 @@ func RewriteSourceOpts(src []byte, funcName string, opts RewriteOptions) ([]byte
 			return nil, fmt.Errorf("per-instance rewrite requested for free function %q — use rewire.Func instead", funcName)
 		}
 		if !isPointer {
+			// The value-receiver-shaped name might actually be an
+			// interface method that should have been routed to the
+			// codegen path. If we can detect an interface with this
+			// name in the current file, produce a more actionable
+			// error pointing at the routing bug.
+			if isInterfaceTypeNamed(file, typeName) {
+				return nil, fmt.Errorf(
+					"rewire: per-instance rewrite requested for %q, but %q is declared as an interface in this file.\n"+
+						"  Interface methods are mocked via rewire.NewMock and a synthesized backing struct,\n"+
+						"  not via rewriter-level method rewriting. This indicates the toolexec scanner failed\n"+
+						"  to recognize a rewire.NewMock[%s] reference and route the InstanceMethod call to\n"+
+						"  the codegen path — this is a rewire bug, please report it",
+					funcName, typeName, typeName,
+				)
+			}
 			return nil, fmt.Errorf("per-instance rewrite requested for value-receiver method %q — value receivers are copied on every call and have no stable identity", funcName)
 		}
 	}
@@ -481,6 +496,28 @@ func %s%s(%s) %s {
 }
 
 // findTypeDeclTypeParams searches file for a top-level type declaration
+// isInterfaceTypeNamed reports whether file declares typeName as an
+// interface type. Used by error reporting to distinguish "value-receiver
+// method on a struct" (the original failure mode of the value-receiver
+// check) from "interface method routed here by mistake".
+func isInterfaceTypeNamed(file *ast.File, typeName string) bool {
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.TYPE {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			ts, ok := spec.(*ast.TypeSpec)
+			if !ok || ts.Name.Name != typeName {
+				continue
+			}
+			_, isInterface := ts.Type.(*ast.InterfaceType)
+			return isInterface
+		}
+	}
+	return false
+}
+
 // named typeName and returns its type parameter list, or nil if the type
 // is not declared in the file or has no type parameters.
 func findTypeDeclTypeParams(file *ast.File, typeName string) *ast.FieldList {

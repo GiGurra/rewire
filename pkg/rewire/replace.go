@@ -37,13 +37,40 @@ func RegisterReal(funcName string, realFn any) {
 	realRegistry.Store(funcName+"|"+typeKey, realFn)
 }
 
-// RegisterByInstance maps a fully-qualified method name to a pointer to
-// its per-instance mock table (a *sync.Map). Called by generated init()
-// code for methods that are referenced by at least one
-// rewire.InstanceMethod / rewire.RestoreInstanceMethod call in the test
-// module. Users should not call it directly.
-func RegisterByInstance(funcName string, byInstanceMap *sync.Map) {
-	byInstanceRegistry.Store(funcName, byInstanceMap)
+// RegisterByInstance maps a fully-qualified method name + function-type
+// signature to a pointer to its per-instance mock table (a *sync.Map).
+// Called by generated init() code for methods that are referenced by
+// at least one rewire.InstanceMethod / rewire.RestoreInstanceMethod
+// call in the test module. Users should not call it directly.
+//
+// The witness parameter exists solely for type inference: F is
+// resolved from the witness's static type, and the registry key is
+// derived through reflect.TypeFor[F]() at registration time AND at
+// lookup time. The witness value itself is never used. Generated code
+// passes either an existing typed function value (e.g. a Real_X
+// variable from the rewriter) or a typed nil cast.
+//
+// This is what lets generic interfaces work cleanly:
+// bar.ContainerIface[int].Add and bar.ContainerIface[string].Add
+// share the same funcName from runtime.FuncForPC
+// ("bar.ContainerIface.Add" after stripping the "[...]" placeholder),
+// but their function types
+// (`func(bar.ContainerIface[int], int)` vs
+// `func(bar.ContainerIface[string], string)`) disambiguate them in
+// the composite key.
+//
+// For non-generic methods the type parameter is still useful — it
+// keeps the registration path uniform and lets the same mechanism
+// handle both cases without a separate code path.
+func RegisterByInstance[F any](funcName string, byInstanceMap *sync.Map, _ F) {
+	byInstanceRegistry.Store(byInstanceKey[F](funcName), byInstanceMap)
+}
+
+// byInstanceKey returns the composite registry key used by
+// RegisterByInstance and resolveByInstanceMap. Centralizing the key
+// formula in one helper guarantees the two sides cannot drift.
+func byInstanceKey[F any](funcName string) string {
+	return funcName + "|" + reflect.TypeFor[F]().String()
 }
 
 // RegisterMockFactory registers a factory that produces a fresh mock
@@ -63,7 +90,7 @@ func RegisterByInstance(funcName string, byInstanceMap *sync.Map) {
 // call site.
 func RegisterMockFactory[I any](factory func() any) {
 	typ := reflect.TypeFor[I]()
-	if typ == nil || typ.Kind() != reflect.Interface || typ.PkgPath() == "" || typ.Name() == "" {
+	if typ.Kind() != reflect.Interface || typ.PkgPath() == "" || typ.Name() == "" {
 		// The toolexec codegen only emits RegisterMockFactory for
 		// named, exported interfaces — anything else is a bug in
 		// rewire itself, not user error. Fail loudly so we catch it.
@@ -103,10 +130,6 @@ func NewMock[I any](t *testing.T) I {
 
 	var zero I
 	typ := reflect.TypeFor[I]()
-	if typ == nil {
-		t.Fatal("rewire.NewMock: type parameter I has no runtime type")
-		return zero
-	}
 	if typ.Kind() != reflect.Interface {
 		t.Fatalf("rewire.NewMock: type parameter I must be an interface, got %s (kind %s)", typ, typ.Kind())
 		return zero
@@ -399,6 +422,10 @@ func restoreInstanceAll(instance any) {
 // or fatally fails the test if no such table exists (target wasn't
 // referenced by any InstanceMethod / RestoreInstanceMethod call, so the
 // rewriter didn't emit the per-instance dispatch).
+//
+// Lookup uses the composite key (funcName + "|" + function type
+// signature) so generic interface methods can have one dispatch table
+// per instantiation. See RegisterByInstance for the rationale.
 func resolveByInstanceMap[F any](t *testing.T, original F) *sync.Map {
 	t.Helper()
 
@@ -408,13 +435,15 @@ func resolveByInstanceMap[F any](t *testing.T, original F) *sync.Map {
 		return nil
 	}
 
-	entry, ok := byInstanceRegistry.Load(name)
+	key := byInstanceKey[F](name)
+	entry, ok := byInstanceRegistry.Load(key)
 	if !ok {
 		t.Fatalf("rewire.InstanceMethod: no per-instance dispatch table registered for %s.\n"+
 			"  InstanceMethod requires the target to be a pointer-receiver method referenced by\n"+
 			"  rewire.InstanceMethod or rewire.RestoreInstanceMethod somewhere in the test module,\n"+
-			"  so that the compiler wrapper is emitted with per-instance support.",
-			name)
+			"  so that the compiler wrapper is emitted with per-instance support.\n"+
+			"  Resolved registry key was %q.",
+			name, key)
 		return nil
 	}
 	m, ok := entry.(*sync.Map)

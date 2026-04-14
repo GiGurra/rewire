@@ -302,6 +302,12 @@ func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, pkg
 // module-wide) and emits a backing struct file for each one into
 // tmpDir. Returns the paths of the generated files so the caller can
 // append them to the compiler args.
+//
+// For generic interfaces, each unique (ifaceName, type-args)
+// instantiation produces its own backing struct file. The mock for
+// Container[int] is independent from Container[string] — distinct
+// struct types, distinct factory keys, distinct per-instance dispatch
+// tables.
 func generateInterfaceMocks(compileArgs []string, tmpDir string) ([]string, func(), error) {
 	// Walk the test files in this compile and collect mocked interface refs.
 	pkgMockedIfaces := mockedInterfaces{}
@@ -313,10 +319,10 @@ func generateInterfaceMocks(compileArgs []string, tmpDir string) ([]string, func
 		_, _, _, fileMocks := scanFileForMockCalls(arg)
 		for ip, ifaces := range fileMocks {
 			if pkgMockedIfaces[ip] == nil {
-				pkgMockedIfaces[ip] = map[string]bool{}
+				pkgMockedIfaces[ip] = map[string][][]string{}
 			}
-			for name := range ifaces {
-				pkgMockedIfaces[ip][name] = true
+			for name, combos := range ifaces {
+				pkgMockedIfaces[ip][name] = append(pkgMockedIfaces[ip][name], combos...)
 			}
 		}
 		// Need the test package name for the emitted file's package clause.
@@ -334,6 +340,14 @@ func generateInterfaceMocks(compileArgs []string, tmpDir string) ([]string, func
 		return nil, nil, fmt.Errorf("could not determine test package name for interface mock generation")
 	}
 
+	// Dedupe combos per interface so two test files referencing the
+	// same instantiation only generate one backing struct.
+	for _, ifaces := range pkgMockedIfaces {
+		for name, combos := range ifaces {
+			ifaces[name] = dedupeTypeArgs(combos)
+		}
+	}
+
 	var generatedPaths []string
 	for importPath, ifaces := range pkgMockedIfaces {
 		// Locate the source file in the interface's declaring package
@@ -345,25 +359,57 @@ func generateInterfaceMocks(compileArgs []string, tmpDir string) ([]string, func
 			return nil, nil, fmt.Errorf("locating package %s for interface mock generation: %w", importPath, err)
 		}
 
-		for ifaceName := range ifaces {
+		for ifaceName, combos := range ifaces {
 			srcBytes, err := readInterfaceSource(pkgDir, ifaceName)
 			if err != nil {
 				return nil, nil, fmt.Errorf("reading source of interface %s.%s: %w", importPath, ifaceName, err)
 			}
 
 			alias := defaultPkgAlias(importPath)
-			generated, err := mockgen.GenerateRewireMock(srcBytes, ifaceName, importPath, alias, pkgName)
-			if err != nil {
-				return nil, nil, fmt.Errorf("generating mock for %s.%s: %w", importPath, ifaceName, err)
+			for _, typeArgs := range combos {
+				generated, err := mockgen.GenerateRewireMock(srcBytes, ifaceName, importPath, alias, pkgName, typeArgs)
+				if err != nil {
+					return nil, nil, fmt.Errorf("generating mock for %s.%s%s: %w", importPath, ifaceName, formatTypeArgs(typeArgs), err)
+				}
+				outPath := filepath.Join(tmpDir, fmt.Sprintf("_rewire_mock_%s_%s%s_test.go", alias, ifaceName, mangleTypeArgs(typeArgs)))
+				if err := os.WriteFile(outPath, generated, 0644); err != nil {
+					return nil, nil, fmt.Errorf("writing generated mock file: %w", err)
+				}
+				generatedPaths = append(generatedPaths, outPath)
 			}
-			outPath := filepath.Join(tmpDir, fmt.Sprintf("_rewire_mock_%s_%s_test.go", alias, ifaceName))
-			if err := os.WriteFile(outPath, generated, 0644); err != nil {
-				return nil, nil, fmt.Errorf("writing generated mock file: %w", err)
-			}
-			generatedPaths = append(generatedPaths, outPath)
 		}
 	}
 	return generatedPaths, nil, nil
+}
+
+// formatTypeArgs renders a type-arg combo as user-facing source text
+// for error messages, e.g. ["int"] → "[int]". An empty combo (the
+// non-generic case) returns "".
+func formatTypeArgs(typeArgs []string) string {
+	if len(typeArgs) == 0 {
+		return ""
+	}
+	return "[" + strings.Join(typeArgs, ", ") + "]"
+}
+
+// mangleTypeArgs renders a type-arg combo as a Go-identifier-safe
+// suffix for generated filenames, e.g. ["*time.Time", "int"] →
+// "_ptr_time_Time_int". An empty combo returns "" so non-generic
+// filenames stay unchanged.
+func mangleTypeArgs(typeArgs []string) string {
+	if len(typeArgs) == 0 {
+		return ""
+	}
+	r := strings.NewReplacer(
+		"*", "ptr_",
+		".", "_",
+		"[", "_",
+		"]", "_",
+		" ", "",
+		",", "_",
+		"/", "_",
+	)
+	return "_" + r.Replace(strings.Join(typeArgs, "_"))
 }
 
 // resolvePackageDir resolves an import path to an absolute directory
@@ -541,9 +587,26 @@ func generateRegistration(compileArgs []string, targets mockTargets, instantiati
 			// RestoreInstanceMethod need the per-instance table registered.
 			// The rewriter emitted a Mock_Type_Method_ByInstance sync.Map
 			// at the same package level.
+			//
+			// The witness arg is the rewriter's Real_X alias — for
+			// non-generic methods that's a single function value, for
+			// generic methods on generic types it's instantiated per
+			// type-arg combination (one RegisterByInstance call per
+			// instantiation, each with the witness instantiated to the
+			// matching type args so reflect.TypeFor sees the right
+			// signature).
 			if byInstance[e.importPath][fn] {
-				fmt.Fprintf(&b, "\trewire.RegisterByInstance(%q, &%s.%s_ByInstance)\n",
-					e.importPath+"."+fn, e.alias, mockVarName(fn))
+				if isGenericFunc(e.importPath, fn) {
+					combos := instantiations[e.importPath][fn]
+					for _, typeArgs := range combos {
+						fmt.Fprintf(&b, "\trewire.RegisterByInstance(%q, &%s.%s_ByInstance, %s.%s[%s])\n",
+							e.importPath+"."+fn, e.alias, mockVarName(fn),
+							e.alias, realVarName(fn), strings.Join(typeArgs, ", "))
+					}
+				} else {
+					fmt.Fprintf(&b, "\trewire.RegisterByInstance(%q, &%s.%s_ByInstance, %s.%s)\n",
+						e.importPath+"."+fn, e.alias, mockVarName(fn), e.alias, realVarName(fn))
+				}
 			}
 		}
 	}
