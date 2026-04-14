@@ -1,6 +1,6 @@
 # Limitations
 
-The compiler-intrinsic, parallel-mock, bodyless-function, and build-cache items below apply to compile-time function and method mocking (toolexec). Interface mock generation has its own (smaller) set of gaps — see [Interface mocks](#interface-mocks-rewirenewmockt) at the bottom of this page.
+The items below apply to compile-time function and method mocking (toolexec). Interface mock generation (`rewire.NewMock[T]`) has no documented limitations at this time — see [Interface Mocks](interface-mocks.md) for the full feature set.
 
 Per-instance method stubs are fully supported natively — see [Per-instance method mocks](method-mocking.md#per-instance-method-mocks).
 
@@ -22,12 +22,6 @@ Two parallel tests mocking **different** functions is fine — there's no conten
 ## Bodyless functions
 
 Functions implemented in assembly (no Go body) cannot be rewritten. These are typically low-level runtime or math functions. Rewire will fail with an error if you try to mock one.
-
-## Interface mocks (`rewire.NewMock[T]`)
-
-- **Dot imports in the interface's declaring file** — `import . "pkg"` brings package-level names into the file's top-level scope unqualified. The generator assumes any bare identifier in a method signature that isn't a predeclared type or a type parameter is a same-package type, which is wrong under a dot import. Dot imports are rare and discouraged; if you hit this, the generated file will fail to compile with a clear "undefined" error.
-
-For the full list of supported shapes see [Interface Mocks](interface-mocks.md).
 
 ## Build cache considerations
 

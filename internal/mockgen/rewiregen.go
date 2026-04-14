@@ -27,6 +27,21 @@ import (
 // GenerateRewireMock returns a clear error.
 type InterfaceResolver func(importPath, interfaceName string) ([]byte, error)
 
+// PackageTypeLister returns the set of exported top-level type names
+// declared in the package at importPath. Used to support dot imports
+// (`import . "pkg"`): when an interface's declaring file pulls a
+// package into its top-level scope via a dot import, any bare
+// identifier in a method signature that matches a name in that pkg
+// must be qualified with the dot-imported package's alias rather than
+// the interface's own package alias.
+//
+// Implementation lives in the toolexec wrapper (readdir + ast parse).
+// mockgen calls the lister only when it detects `.` imports in a
+// parsed interface file. nil is fine for interfaces that have no dot
+// imports; if a dot import is present and the lister is nil, mockgen
+// returns a clear error.
+type PackageTypeLister func(importPath string) (map[string]bool, error)
+
 // flatMethod is an interface method flattened with any type-parameter
 // substitutions already applied. Own methods and promoted (embedded)
 // methods become flatMethod values in a single flat list.
@@ -53,6 +68,32 @@ type flatMethod struct {
 	// interfaces in other packages it defaults to the origin package's
 	// last-segment name.
 	originPkgAlias string
+
+	// dotImportAliasToPath maps a local alias chosen for a dot-imported
+	// package (in this method's originating file) to its import path.
+	// Populated only when the originating file has `.` imports. Used
+	// at render time to emit the right `import "pkg"` lines for any
+	// aliases that end up referenced in the qualified funcType.
+	dotImportAliasToPath map[string]string
+}
+
+// dotImportInfo describes the set of dot-imported packages active in
+// a single parsed file. nameToAlias maps an exported type name
+// brought in by a `.` import to the alias we'll use when qualifying
+// it; aliasToPath maps that alias to the real import path so the
+// render step can emit the `import "path"` line.
+//
+// aliases are always the dot-imported package's default last-segment
+// name (e.g. "io" for `import . "io"`) to avoid clashes with the
+// file's other imports.
+type dotImportInfo struct {
+	nameToAlias map[string]string // typeName → alias
+	aliasToPath map[string]string // alias → import path
+}
+
+// empty reports whether the level has no dot-imported types.
+func (d *dotImportInfo) empty() bool {
+	return d == nil || len(d.nameToAlias) == 0
 }
 
 // GenerateRewireMock produces a Go source file for the test package
@@ -88,12 +129,17 @@ type flatMethod struct {
 //   - resolver: used to fetch source for embedded interfaces that are
 //     not declared in `src`. Nil is acceptable when the interface has
 //     no embeds (or only same-file embeds).
+//   - typeLister: used to list exported type names in a package
+//     referenced via `import . "pkg"`. Nil is acceptable when no dot
+//     imports are present; if a `.` import is encountered and the
+//     lister is nil, generation fails with a clear error.
 func GenerateRewireMock(
 	src []byte,
 	interfaceName, interfacePkgPath, interfacePkgAlias, outputPkg string,
 	typeArgs []string,
 	typeArgImports map[string]string,
 	resolver InterfaceResolver,
+	typeLister PackageTypeLister,
 ) ([]byte, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "", src, parser.ParseComments)
@@ -138,7 +184,7 @@ func GenerateRewireMock(
 		iface, ifaceTypeParams, rootTypeArgExprs,
 		fset, file,
 		interfacePkgPath, interfacePkgAlias,
-		resolver, visited,
+		resolver, typeLister, visited,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("collecting methods for interface %q: %w", interfaceName, err)
@@ -211,6 +257,17 @@ func GenerateRewireMock(
 		// so we don't need to import "io" in the generated file).
 		if fm.originPkgPath != "" && fm.originPkgAlias != "" && pkgRefs[fm.originPkgAlias] {
 			originPkgImports[fm.originPkgPath] = fm.originPkgAlias
+		}
+
+		// Similarly record any dot-import aliases that the qualifier
+		// actually used. These come from `.` imports in the method's
+		// originating file — e.g. the file did `import . "io"`, the
+		// qualifier rewrote bare `Reader` to `io.Reader`, and now we
+		// need to import "io" in the generated mock.
+		for alias, path := range fm.dotImportAliasToPath {
+			if pkgRefs[alias] {
+				originPkgImports[path] = alias
+			}
 		}
 
 		// The replacement function type seen from the test author's
@@ -449,6 +506,7 @@ func collectFlatMethods(
 	pkgPath string,
 	pkgAlias string,
 	resolver InterfaceResolver,
+	typeLister PackageTypeLister,
 	visited map[string]bool,
 ) ([]flatMethod, error) {
 	// Build the type-parameter substitution for this level: T → <expr>,
@@ -477,6 +535,17 @@ func collectFlatMethods(
 
 	fileImports := buildFileImports(file)
 
+	// Detect `import . "pkg"` entries and, for each, build the
+	// nameToAlias / aliasToPath maps by asking the type lister for the
+	// dot-imported package's exported types. This information is used
+	// by qualifyBareTypes (to rewrite `Foo` → `io.Foo` instead of
+	// `declaringPkg.Foo`) and by embed resolution (to treat a bare
+	// ident embed as cross-package when the name is dot-imported).
+	dotImports, err := buildDotImportInfo(file, pkgAlias, typeLister)
+	if err != nil {
+		return nil, err
+	}
+
 	var out []flatMethod
 
 	for _, field := range iface.Methods.List {
@@ -486,20 +555,26 @@ func collectFlatMethods(
 			if !ok {
 				return nil, fmt.Errorf("unexpected non-function interface field %q", field.Names[0].Name)
 			}
-			// Qualify bare same-pkg type refs FIRST (skipping this
-			// level's type params), THEN substitute. Substituted-in
-			// exprs come from the parent's scope and are already
-			// qualified from the parent's perspective.
-			qualified := qualifyFuncType(funcType, pkgAlias, typeParamNames)
+			// Qualify bare type refs FIRST (skipping this level's type
+			// params), THEN substitute. Qualification checks
+			// dot-imported names first, then falls back to same-pkg
+			// qualification. Substituted-in exprs come from the
+			// parent's scope and are already qualified from the
+			// parent's perspective.
+			qualified := qualifyFuncType(funcType, pkgAlias, typeParamNames, dotImports)
 			substituted := substituteFuncType(qualified, subst)
-			out = append(out, flatMethod{
+			fm := flatMethod{
 				name:           field.Names[0].Name,
 				funcType:       substituted,
 				fset:           fset,
 				fileImports:    fileImports,
 				originPkgPath:  pkgPath,
 				originPkgAlias: pkgAlias,
-			})
+			}
+			if !dotImports.empty() {
+				fm.dotImportAliasToPath = dotImports.aliasToPath
+			}
+			out = append(out, fm)
 			continue
 		}
 
@@ -509,6 +584,16 @@ func collectFlatMethods(
 			return nil, err
 		}
 
+		// If a bare-ident embed's name matches a dot-imported
+		// type, the embed is actually cross-package. Rewrite the
+		// embedRef so downstream resolution follows the dot-imported
+		// path instead of assuming same-package.
+		if embed.pkgPath == "" && !dotImports.empty() {
+			if alias, ok := dotImports.nameToAlias[embed.ifaceName]; ok {
+				embed.pkgPath = alias
+			}
+		}
+
 		// Resolve embed's declaring package. If it's a same-package
 		// reference, we look first in our already-parsed file, then
 		// (if not found there) fall back to the resolver for other
@@ -516,6 +601,10 @@ func collectFlatMethods(
 		embedPkgPath := embed.pkgPath
 		if embedPkgPath == "" {
 			embedPkgPath = pkgPath
+		} else if dotPath, ok := dotImports.aliasToPath[embed.pkgPath]; ok {
+			// Alias was picked up from a dot-imported package just
+			// above — resolve to the real import path.
+			embedPkgPath = dotPath
 		} else {
 			// Cross-package reference: the embed.pkgPath we parsed is
 			// actually just a local alias (like "io" in "io.Reader").
@@ -545,7 +634,7 @@ func collectFlatMethods(
 		// as-is because qualifyBareTypes leaves SelectorExpr alone.
 		substitutedEmbedArgs := make([]ast.Expr, len(embed.typeArgExprs))
 		for i, expr := range embed.typeArgExprs {
-			q := qualifyBareTypes(expr, pkgAlias, typeParamNames)
+			q := qualifyBareTypes(expr, pkgAlias, typeParamNames, dotImports)
 			substitutedEmbedArgs[i] = substTypeExpr(q, subst)
 		}
 
@@ -610,7 +699,7 @@ func collectFlatMethods(
 			embedIface, embedTP, substitutedEmbedArgs,
 			embedFset, embedFile,
 			embedPkgPath, embedPkgAlias,
-			resolver, visited,
+			resolver, typeLister, visited,
 		)
 		if err != nil {
 			return nil, err
@@ -767,13 +856,24 @@ var predeclaredTypes = map[string]bool{
 // excluded via predeclaredTypes and skipIdents; anything left is (c).
 // Dot imports (`import . "pkg"`) are the one exception — rare and
 // discouraged, we accept imperfect handling there.
-func qualifyBareTypes(t ast.Expr, pkgAlias string, skipIdents map[string]bool) ast.Expr {
-	if pkgAlias == "" || t == nil {
+func qualifyBareTypes(t ast.Expr, pkgAlias string, skipIdents map[string]bool, dotImports *dotImportInfo) ast.Expr {
+	if t == nil {
 		return t
 	}
 	switch e := t.(type) {
 	case *ast.Ident:
-		if predeclaredTypes[e.Name] || e.Name == "_" || skipIdents[e.Name] {
+		// Dot-imported names take priority over same-pkg qualification:
+		// the file says `import . "io"`, so bare `Reader` means
+		// `io.Reader`, not `declaringpkg.Reader`.
+		if !dotImports.empty() {
+			if alias, ok := dotImports.nameToAlias[e.Name]; ok {
+				return &ast.SelectorExpr{
+					X:   ast.NewIdent(alias),
+					Sel: ast.NewIdent(e.Name),
+				}
+			}
+		}
+		if pkgAlias == "" || predeclaredTypes[e.Name] || e.Name == "_" || skipIdents[e.Name] {
 			return e
 		}
 		return &ast.SelectorExpr{
@@ -781,44 +881,44 @@ func qualifyBareTypes(t ast.Expr, pkgAlias string, skipIdents map[string]bool) a
 			Sel: ast.NewIdent(e.Name),
 		}
 	case *ast.StarExpr:
-		return &ast.StarExpr{Star: e.Star, X: qualifyBareTypes(e.X, pkgAlias, skipIdents)}
+		return &ast.StarExpr{Star: e.Star, X: qualifyBareTypes(e.X, pkgAlias, skipIdents, dotImports)}
 	case *ast.ArrayType:
-		return &ast.ArrayType{Lbrack: e.Lbrack, Len: e.Len, Elt: qualifyBareTypes(e.Elt, pkgAlias, skipIdents)}
+		return &ast.ArrayType{Lbrack: e.Lbrack, Len: e.Len, Elt: qualifyBareTypes(e.Elt, pkgAlias, skipIdents, dotImports)}
 	case *ast.MapType:
 		return &ast.MapType{
 			Map:   e.Map,
-			Key:   qualifyBareTypes(e.Key, pkgAlias, skipIdents),
-			Value: qualifyBareTypes(e.Value, pkgAlias, skipIdents),
+			Key:   qualifyBareTypes(e.Key, pkgAlias, skipIdents, dotImports),
+			Value: qualifyBareTypes(e.Value, pkgAlias, skipIdents, dotImports),
 		}
 	case *ast.ChanType:
 		return &ast.ChanType{
 			Begin: e.Begin,
 			Arrow: e.Arrow,
 			Dir:   e.Dir,
-			Value: qualifyBareTypes(e.Value, pkgAlias, skipIdents),
+			Value: qualifyBareTypes(e.Value, pkgAlias, skipIdents, dotImports),
 		}
 	case *ast.FuncType:
 		return &ast.FuncType{
 			Func:    e.Func,
-			Params:  qualifyBareTypesInFieldList(e.Params, pkgAlias, skipIdents),
-			Results: qualifyBareTypesInFieldList(e.Results, pkgAlias, skipIdents),
+			Params:  qualifyBareTypesInFieldList(e.Params, pkgAlias, skipIdents, dotImports),
+			Results: qualifyBareTypesInFieldList(e.Results, pkgAlias, skipIdents, dotImports),
 		}
 	case *ast.Ellipsis:
-		return &ast.Ellipsis{Ellipsis: e.Ellipsis, Elt: qualifyBareTypes(e.Elt, pkgAlias, skipIdents)}
+		return &ast.Ellipsis{Ellipsis: e.Ellipsis, Elt: qualifyBareTypes(e.Elt, pkgAlias, skipIdents, dotImports)}
 	case *ast.IndexExpr:
 		return &ast.IndexExpr{
-			X:      qualifyBareTypes(e.X, pkgAlias, skipIdents),
+			X:      qualifyBareTypes(e.X, pkgAlias, skipIdents, dotImports),
 			Lbrack: e.Lbrack,
-			Index:  qualifyBareTypes(e.Index, pkgAlias, skipIdents),
+			Index:  qualifyBareTypes(e.Index, pkgAlias, skipIdents, dotImports),
 			Rbrack: e.Rbrack,
 		}
 	case *ast.IndexListExpr:
 		newIndices := make([]ast.Expr, len(e.Indices))
 		for i, ix := range e.Indices {
-			newIndices[i] = qualifyBareTypes(ix, pkgAlias, skipIdents)
+			newIndices[i] = qualifyBareTypes(ix, pkgAlias, skipIdents, dotImports)
 		}
 		return &ast.IndexListExpr{
-			X:       qualifyBareTypes(e.X, pkgAlias, skipIdents),
+			X:       qualifyBareTypes(e.X, pkgAlias, skipIdents, dotImports),
 			Lbrack:  e.Lbrack,
 			Indices: newIndices,
 			Rbrack:  e.Rbrack,
@@ -831,44 +931,106 @@ func qualifyBareTypes(t ast.Expr, pkgAlias string, skipIdents map[string]bool) a
 	case *ast.InterfaceType:
 		return &ast.InterfaceType{
 			Interface:  e.Interface,
-			Methods:    qualifyBareTypesInFieldList(e.Methods, pkgAlias, skipIdents),
+			Methods:    qualifyBareTypesInFieldList(e.Methods, pkgAlias, skipIdents, dotImports),
 			Incomplete: e.Incomplete,
 		}
 	case *ast.StructType:
 		return &ast.StructType{
 			Struct:     e.Struct,
-			Fields:     qualifyBareTypesInFieldList(e.Fields, pkgAlias, skipIdents),
+			Fields:     qualifyBareTypesInFieldList(e.Fields, pkgAlias, skipIdents, dotImports),
 			Incomplete: e.Incomplete,
 		}
 	}
 	return t
 }
 
-func qualifyBareTypesInFieldList(fl *ast.FieldList, pkgAlias string, skipIdents map[string]bool) *ast.FieldList {
+func qualifyBareTypesInFieldList(fl *ast.FieldList, pkgAlias string, skipIdents map[string]bool, dotImports *dotImportInfo) *ast.FieldList {
 	if fl == nil {
 		return nil
 	}
 	newList := make([]*ast.Field, len(fl.List))
 	for i, f := range fl.List {
 		newField := *f
-		newField.Type = qualifyBareTypes(f.Type, pkgAlias, skipIdents)
+		newField.Type = qualifyBareTypes(f.Type, pkgAlias, skipIdents, dotImports)
 		newList[i] = &newField
 	}
 	return &ast.FieldList{Opening: fl.Opening, Closing: fl.Closing, List: newList}
 }
 
 // qualifyFuncType applies qualifyBareTypes to a function type's params
-// and results, returning a new FuncType (zero allocations when
-// pkgAlias is empty).
-func qualifyFuncType(ft *ast.FuncType, pkgAlias string, skipIdents map[string]bool) *ast.FuncType {
-	if pkgAlias == "" || ft == nil {
+// and results, returning a new FuncType. Passes through unchanged
+// when there's no pkgAlias and no dot imports.
+func qualifyFuncType(ft *ast.FuncType, pkgAlias string, skipIdents map[string]bool, dotImports *dotImportInfo) *ast.FuncType {
+	if ft == nil {
+		return ft
+	}
+	if pkgAlias == "" && dotImports.empty() {
 		return ft
 	}
 	return &ast.FuncType{
 		Func:    ft.Func,
-		Params:  qualifyBareTypesInFieldList(ft.Params, pkgAlias, skipIdents),
-		Results: qualifyBareTypesInFieldList(ft.Results, pkgAlias, skipIdents),
+		Params:  qualifyBareTypesInFieldList(ft.Params, pkgAlias, skipIdents, dotImports),
+		Results: qualifyBareTypesInFieldList(ft.Results, pkgAlias, skipIdents, dotImports),
 	}
+}
+
+// buildDotImportInfo scans file.Imports for `.` imports and builds
+// the (nameToAlias, aliasToPath) maps needed for dot-import-aware
+// qualification. Returns an empty info (with nil maps) when the file
+// has no dot imports, in which case qualifyBareTypes skips the
+// lookup and falls back to same-pkg qualification.
+//
+// If the file has a dot import but typeLister is nil,
+// buildDotImportInfo fails with a targeted error — we can't resolve
+// the symbols without help from the toolexec wrapper.
+//
+// If two different dot-imported packages would pick the same default
+// alias, or if a dot-imported package's default alias collides with
+// the interface's own declaring alias, we fail with a clear message.
+// Both cases are rare in practice; when they happen the user can
+// restructure the interface's declaring file.
+func buildDotImportInfo(file *ast.File, declaringPkgAlias string, typeLister PackageTypeLister) (*dotImportInfo, error) {
+	var dotImportPaths []string
+	for _, imp := range file.Imports {
+		if imp.Name != nil && imp.Name.Name == "." {
+			dotImportPaths = append(dotImportPaths, strings.Trim(imp.Path.Value, `"`))
+		}
+	}
+	if len(dotImportPaths) == 0 {
+		return &dotImportInfo{}, nil
+	}
+	if typeLister == nil {
+		return nil, fmt.Errorf("interface's declaring file uses `.` imports (%v) but no PackageTypeLister was supplied — dot-import-aware mock generation needs the toolexec wrapper's resolver", dotImportPaths)
+	}
+	info := &dotImportInfo{
+		nameToAlias: map[string]string{},
+		aliasToPath: map[string]string{},
+	}
+	for _, path := range dotImportPaths {
+		alias := defaultPkgAlias(path)
+		if alias == declaringPkgAlias {
+			return nil, fmt.Errorf("dot-imported package %q has the same default alias %q as the interface's own package — please rename or restructure", path, alias)
+		}
+		if existingPath, clash := info.aliasToPath[alias]; clash && existingPath != path {
+			return nil, fmt.Errorf("dot-imported packages %q and %q both resolve to alias %q — please rename or restructure", existingPath, path, alias)
+		}
+		names, err := typeLister(path)
+		if err != nil {
+			return nil, fmt.Errorf("listing exported types of dot-imported package %q: %w", path, err)
+		}
+		info.aliasToPath[alias] = path
+		for name := range names {
+			if _, exists := info.nameToAlias[name]; exists {
+				// Same name imported via two different dot-imported
+				// packages — Go itself would reject this as
+				// ambiguous, so the interface's source wouldn't even
+				// compile. Fail with a matching diagnostic.
+				return nil, fmt.Errorf("name %q is brought in by two different dot-imported packages — ambiguous", name)
+			}
+			info.nameToAlias[name] = alias
+		}
+	}
+	return info, nil
 }
 
 // commaPrepend returns ", s" if s is non-empty, or "" otherwise.

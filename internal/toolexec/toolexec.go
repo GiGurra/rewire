@@ -368,7 +368,7 @@ func generateInterfaceMocks(compileArgs []string, tmpDir string) ([]string, func
 
 			alias := defaultPkgAlias(importPath)
 			for _, inst := range instances {
-				generated, err := mockgen.GenerateRewireMock(srcBytes, ifaceName, importPath, alias, pkgName, inst.TypeArgs, inst.TypeArgImports, resolveInterfaceSource)
+				generated, err := mockgen.GenerateRewireMock(srcBytes, ifaceName, importPath, alias, pkgName, inst.TypeArgs, inst.TypeArgImports, resolveInterfaceSource, listPackageExportedTypes)
 				if err != nil {
 					return nil, nil, fmt.Errorf("generating mock for %s.%s%s: %w", importPath, ifaceName, formatTypeArgs(inst.TypeArgs), err)
 				}
@@ -498,8 +498,8 @@ func envWithoutGOFLAGS() []string {
 // resolveInterfaceSource is the InterfaceResolver implementation
 // plumbed into mockgen.GenerateRewireMock. Given a package import path
 // and an interface name, it locates the package's source directory
-// (via go/build) and returns the raw bytes of whichever .go file in
-// that directory declares the interface.
+// (via go list / go/build) and returns the raw bytes of whichever .go
+// file in that directory declares the interface.
 //
 // Used by mockgen to walk embedded interface chains: for an embed like
 // `io.Reader`, mockgen asks this resolver for ("io", "Reader") and
@@ -511,6 +511,58 @@ func resolveInterfaceSource(importPath, interfaceName string) ([]byte, error) {
 		return nil, err
 	}
 	return readInterfaceSource(pkgDir, interfaceName)
+}
+
+// listPackageExportedTypes is the PackageTypeLister implementation
+// plumbed into mockgen.GenerateRewireMock. For a given import path,
+// it returns the set of all exported top-level type names declared
+// in that package's non-test .go files.
+//
+// Called by mockgen when an interface's declaring file uses
+// `import . "pkg"` — mockgen needs to know which bare identifiers in
+// the interface's method signatures actually refer to the
+// dot-imported package versus the declaring package itself.
+func listPackageExportedTypes(importPath string) (map[string]bool, error) {
+	pkgDir, err := resolvePackageDir(importPath)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(pkgDir)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]bool{}
+	fset := token.NewFileSet()
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(pkgDir, name), nil, parser.SkipObjectResolution)
+		if err != nil {
+			// Skip files we can't parse — the exported set is still
+			// useful from whatever files we can read. If nothing
+			// parses, the caller will get an empty set and the
+			// qualifier will behave as if there were no dot-imports.
+			continue
+		}
+		for _, decl := range f.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				ts, ok := spec.(*ast.TypeSpec)
+				if !ok {
+					continue
+				}
+				if ts.Name.IsExported() {
+					out[ts.Name.Name] = true
+				}
+			}
+		}
+	}
+	return out, nil
 }
 
 // readInterfaceSource finds the .go file in pkgDir that declares

@@ -15,7 +15,7 @@ type GreeterIface interface {
 	Greet(name string) string
 }
 `)
-	out, err := GenerateRewireMock(src, "GreeterIface", "github.com/example/bar", "bar", "footest", nil, nil, nil)
+	out, err := GenerateRewireMock(src, "GreeterIface", "github.com/example/bar", "bar", "footest", nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ type Logger interface {
 	Logf(format string, args ...any)
 }
 `)
-	out, err := GenerateRewireMock(src, "Logger", "example/logpkg", "logpkg", "footest", nil, nil, nil)
+	out, err := GenerateRewireMock(src, "Logger", "example/logpkg", "logpkg", "footest", nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ type Bigger interface {
 	Name() string
 }
 `)
-	out, err := GenerateRewireMock(src, "Bigger", "example/bar", "bar", "footest", nil, nil, nil)
+	out, err := GenerateRewireMock(src, "Bigger", "example/bar", "bar", "footest", nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ type Reader interface {
 }
 `), nil
 	}
-	out, err := GenerateRewireMock(rootSrc, "Closeable", "example/bar", "bar", "footest", nil, nil, resolver)
+	out, err := GenerateRewireMock(rootSrc, "Closeable", "example/bar", "bar", "footest", nil, nil, resolver, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +198,7 @@ type Outer[U any] interface {
 	List() []U
 }
 `)
-	out, err := GenerateRewireMock(src, "Outer", "example/bar", "bar", "footest", []string{"int"}, nil, nil)
+	out, err := GenerateRewireMock(src, "Outer", "example/bar", "bar", "footest", []string{"int"}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +236,7 @@ type WithEmbed interface {
 	io.Reader
 }
 `)
-	_, err := GenerateRewireMock(src, "WithEmbed", "example/bar", "bar", "footest", nil, nil, nil)
+	_, err := GenerateRewireMock(src, "WithEmbed", "example/bar", "bar", "footest", nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error when resolver is nil and embed crosses packages")
 	}
@@ -255,7 +255,7 @@ type Store[V any] interface {
 	Set(key string, v V)
 }
 `)
-	_, err := GenerateRewireMock(src, "Store", "example/bar", "bar", "footest", nil, nil, nil)
+	_, err := GenerateRewireMock(src, "Store", "example/bar", "bar", "footest", nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected arity error")
 	}
@@ -272,7 +272,7 @@ type Greeter interface {
 	Greet(name string) string
 }
 `)
-	_, err := GenerateRewireMock(src, "Greeter", "example/bar", "bar", "footest", []string{"int"}, nil, nil)
+	_, err := GenerateRewireMock(src, "Greeter", "example/bar", "bar", "footest", []string{"int"}, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected arity error for non-generic interface with type args")
 	}
@@ -293,7 +293,7 @@ type Container[T any] interface {
 	Len() int
 }
 `)
-	out, err := GenerateRewireMock(src, "Container", "github.com/example/bar", "bar", "footest", []string{"int"}, nil, nil)
+	out, err := GenerateRewireMock(src, "Container", "github.com/example/bar", "bar", "footest", []string{"int"}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -347,7 +347,7 @@ type Holder[T any] interface {
 		"Holder", "github.com/example/bar", "bar", "footest",
 		[]string{"context.Context"},
 		map[string]string{"context": "context"},
-		nil,
+		nil, nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -377,7 +377,7 @@ type Holder[T any] interface {
 		"Holder", "github.com/example/bar", "bar", "footest",
 		[]string{"time.Duration"},
 		map[string]string{"time": "time"},
-		nil,
+		nil, nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -410,7 +410,7 @@ type Service interface {
 	List() []Widget
 }
 `)
-	out, err := GenerateRewireMock(src, "Service", "example/bar", "bar", "footest", nil, nil, nil)
+	out, err := GenerateRewireMock(src, "Service", "example/bar", "bar", "footest", nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -455,7 +455,7 @@ type Service interface {
 	Get() *Widget
 }
 `)
-	out, err := GenerateRewireMock(src, "Service", "example/bar", "bar", "footest", nil, nil, nil)
+	out, err := GenerateRewireMock(src, "Service", "example/bar", "bar", "footest", nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,7 +478,7 @@ type Basic interface {
 	Raw() any
 }
 `)
-	out, err := GenerateRewireMock(src, "Basic", "example/bar", "bar", "footest", nil, nil, nil)
+	out, err := GenerateRewireMock(src, "Basic", "example/bar", "bar", "footest", nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -516,7 +516,7 @@ type Holder[T any] interface {
 	// where Widget lives in the test package, so the scanner passes
 	// "*Widget" as the type-arg string. In the generated mock
 	// (which IS the test package), *Widget stays unqualified.
-	out, err := GenerateRewireMock(src, "Holder", "example/bar", "bar", "footest", []string{"*Widget"}, nil, nil)
+	out, err := GenerateRewireMock(src, "Holder", "example/bar", "bar", "footest", []string{"*Widget"}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -538,6 +538,167 @@ type Holder[T any] interface {
 	}
 }
 
+// Dot imports: an interface file with `import . "pkg"` brings
+// pkg's exported names into the file's top-level scope. Method
+// signatures that reference those names as bare identifiers must be
+// qualified with the dot-imported package's alias in the generated
+// mock, not with the interface's own declaring package.
+func TestGenerateRewireMock_DotImportedTypeInMethodSig(t *testing.T) {
+	// Simulated "io" package with a Reader type — the interface
+	// file below will dot-import it.
+	lister := func(path string) (map[string]bool, error) {
+		if path != "example.com/io" {
+			return nil, fmt.Errorf("unexpected typeLister call: %s", path)
+		}
+		return map[string]bool{"Reader": true, "Closer": true}, nil
+	}
+
+	src := []byte(`package bar
+
+import . "example.com/io"
+
+type Service interface {
+	Open() Reader             // dot-imported → example.com/io.Reader
+	Close() error             // predeclared → left alone
+	CloseAll(cs []Closer)     // dot-imported in a slice
+}
+`)
+	out, err := GenerateRewireMock(src, "Service", "example/bar", "bar", "footest", nil, nil, nil, lister)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+	t.Log("Generated:\n" + result)
+
+	fset := token.NewFileSet()
+	if _, err := parser.ParseFile(fset, "", result, parser.ParseComments); err != nil {
+		t.Fatalf("generated source does not parse: %v\n%s", err, result)
+	}
+
+	mustContain := []string{
+		// Reader → io.Reader, Closer → io.Closer (the dot-imported
+		// alias, not bar.Reader / bar.Closer).
+		`func (m *_rewire_mock_bar_Service) Open() (_r0 io.Reader)`,
+		`func (m *_rewire_mock_bar_Service) CloseAll(cs []io.Closer)`,
+		// The dot-imported package shows up in the import block.
+		`"example.com/io"`,
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(result, s) {
+			t.Errorf("expected output to contain %q\n---\n%s", s, result)
+		}
+	}
+
+	// bar.Reader / bar.Closer should NOT appear anywhere — these
+	// would indicate we qualified with the wrong package.
+	shouldNot := []string{"bar.Reader", "bar.Closer"}
+	for _, s := range shouldNot {
+		if strings.Contains(result, s) {
+			t.Errorf("dot-imported type was qualified with wrong alias: found %q\n---\n%s", s, result)
+		}
+	}
+}
+
+// Dot-imported interface used as an embed — a bare ident in embed
+// position pointing at a dot-imported interface must be treated as a
+// cross-package embed, not as a same-package reference.
+func TestGenerateRewireMock_DotImportedInterfaceAsEmbed(t *testing.T) {
+	lister := func(path string) (map[string]bool, error) {
+		if path != "example.com/io" {
+			return nil, fmt.Errorf("unexpected typeLister call: %s", path)
+		}
+		return map[string]bool{"Reader": true}, nil
+	}
+
+	resolver := func(importPath, ifaceName string) ([]byte, error) {
+		if importPath != "example.com/io" || ifaceName != "Reader" {
+			return nil, fmt.Errorf("unexpected resolver call: %s.%s", importPath, ifaceName)
+		}
+		return []byte(`package io
+
+type Reader interface {
+	Read(p []byte) (n int, err error)
+}
+`), nil
+	}
+
+	src := []byte(`package bar
+
+import . "example.com/io"
+
+type Wrapper interface {
+	Reader         // dot-imported interface, embedded as bare ident
+	Extra() string
+}
+`)
+	out, err := GenerateRewireMock(src, "Wrapper", "example/bar", "bar", "footest", nil, nil, resolver, lister)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+	t.Log("Generated:\n" + result)
+
+	fset := token.NewFileSet()
+	if _, err := parser.ParseFile(fset, "", result, parser.ParseComments); err != nil {
+		t.Fatalf("generated source does not parse: %v\n%s", err, result)
+	}
+
+	// Read was promoted from the dot-imported io.Reader.
+	mustContain := []string{
+		`func (m *_rewire_mock_bar_Wrapper) Read(p []byte) (_r0 int, _r1 error)`,
+		`func (m *_rewire_mock_bar_Wrapper) Extra() (_r0 string)`,
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(result, s) {
+			t.Errorf("expected output to contain %q\n---\n%s", s, result)
+		}
+	}
+}
+
+// A file without any dot imports must not call the typeLister at
+// all — zero overhead for the common case.
+func TestGenerateRewireMock_NoDotImportsDoesNotCallLister(t *testing.T) {
+	called := false
+	lister := func(path string) (map[string]bool, error) {
+		called = true
+		return nil, nil
+	}
+	src := []byte(`package bar
+
+type Simple interface {
+	Greet(name string) string
+}
+`)
+	_, err := GenerateRewireMock(src, "Simple", "example/bar", "bar", "footest", nil, nil, nil, lister)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Error("PackageTypeLister was invoked for a file with no dot imports")
+	}
+}
+
+// When a dot-imported file is present but the caller passes nil for
+// the typeLister, mockgen must fail clearly — it can't guess what
+// names the dot-imported package brings in.
+func TestGenerateRewireMock_DotImportWithNilListerErrors(t *testing.T) {
+	src := []byte(`package bar
+
+import . "example.com/io"
+
+type Service interface {
+	Open() Reader
+}
+`)
+	_, err := GenerateRewireMock(src, "Service", "example/bar", "bar", "footest", nil, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected error when dot import present and typeLister is nil")
+	}
+	if !strings.Contains(err.Error(), "PackageTypeLister") && !strings.Contains(err.Error(), "dot-import") {
+		t.Errorf("expected error mentioning PackageTypeLister or dot-import, got: %v", err)
+	}
+}
+
 // Multiple type parameters, e.g. Cache[K comparable, V any]. Verifies
 // that arity > 1 substitution works and produces a struct name
 // disambiguated by both type args.
@@ -549,7 +710,7 @@ type Cache[K comparable, V any] interface {
 	Get(k K) (V, bool)
 }
 `)
-	out, err := GenerateRewireMock(src, "Cache", "github.com/example/bar", "bar", "footest", []string{"string", "int"}, nil, nil)
+	out, err := GenerateRewireMock(src, "Cache", "github.com/example/bar", "bar", "footest", []string{"string", "int"}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

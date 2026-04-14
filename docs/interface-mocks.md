@@ -100,6 +100,7 @@ Supported today:
     - Types from the test package itself (`Container[*User]`)
 - **Methods using imported types** — `context.Context`, `io.Reader`, etc.
 - **Methods referencing same-package types as bare identifiers** — an interface in `bar/` can return `*Greeter` (without qualifying it as `*bar.Greeter`), and the generator automatically qualifies it when synthesizing the backing struct into the test package.
+- **Dot imports in the interface's declaring file** — `import . "pkg"` brings the dot-imported package's exported names into the file's top-level scope; the generator detects the dot import, lists the dot-imported package's exported types, and qualifies bare identifiers with the dot-imported alias (so `Reader` resolves to `io.Reader`, not `declaringpkg.Reader`). Bare-ident embeds pointing at dot-imported interfaces are handled the same way — they're treated as cross-package embeds.
 - **Module-aware package resolution** — `replace` directives in `go.mod`, workspace files (`go.work`), and vendor directories are all honored when locating an interface's source. Package lookup goes through `go list` so rewire's resolution is in lock-step with the surrounding Go build system.
 - **Variadic parameters, multi-return, unnamed parameters**
 - **Multiple mocks of the same interface** — scoped independently via per-instance dispatch
