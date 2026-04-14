@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/GiGurra/rewire/internal/mockgen"
 	"github.com/GiGurra/rewire/internal/rewriter"
@@ -412,17 +413,86 @@ func mangleTypeArgs(typeArgs []string) string {
 	return "_" + r.Replace(strings.Join(typeArgs, "_"))
 }
 
+// packageDirCache memoizes resolvePackageDir results for the lifetime
+// of a single toolexec invocation. `go list` isn't slow, but a compile
+// step that mocks several interfaces from the same package would
+// otherwise shell out once per interface — this keeps it to once per
+// package path.
+var packageDirCache sync.Map // importPath (string) → dir (string) or error
+
 // resolvePackageDir resolves an import path to an absolute directory
-// containing its source files, via go/build.
+// containing its source files. Uses `go list -find -f '{{.Dir}}'` so
+// resolution matches whatever the surrounding Go build system would
+// use — replace directives in go.mod, workspace files (go.work),
+// vendor directories, and module download locations all flow through
+// `go list`'s standard resolution path.
+//
+// Falls back to go/build.Default.Import for stdlib packages because
+// `go list` for stdlib is unnecessarily expensive and go/build handles
+// $GOROOT/src lookups directly without spawning a subprocess.
+//
+// GOFLAGS is stripped from the subprocess environment so a recursive
+// `-toolexec=rewire` doesn't fire on every `go list` invocation,
+// which would deadlock the toolexec pipeline.
 func resolvePackageDir(importPath string) (string, error) {
-	pkg, err := build.Default.Import(importPath, ".", build.FindOnly)
+	if cached, ok := packageDirCache.Load(importPath); ok {
+		switch v := cached.(type) {
+		case string:
+			return v, nil
+		case error:
+			return "", v
+		}
+	}
+
+	dir, err := resolvePackageDirUncached(importPath)
 	if err != nil {
+		packageDirCache.Store(importPath, err)
 		return "", err
 	}
-	if pkg.Dir == "" {
-		return "", fmt.Errorf("package %s has no resolved directory", importPath)
+	packageDirCache.Store(importPath, dir)
+	return dir, nil
+}
+
+func resolvePackageDirUncached(importPath string) (string, error) {
+	// Stdlib fast path: go/build resolves these without subprocess
+	// overhead. Detect by asking go/build for the package and checking
+	// pkg.Goroot — if set, it's in $GOROOT/src and no replace/vendor
+	// mechanism applies.
+	if pkg, err := build.Default.Import(importPath, ".", build.FindOnly); err == nil && pkg.Goroot && pkg.Dir != "" {
+		return pkg.Dir, nil
 	}
-	return pkg.Dir, nil
+
+	// Module-aware path: defer to `go list`, which knows about
+	// replace/workspace/vendor.
+	cmd := exec.Command("go", "list", "-find", "-f", "{{.Dir}}", importPath)
+	cmd.Env = envWithoutGOFLAGS()
+	out, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("go list %s: %w\nstderr: %s", importPath, err, strings.TrimSpace(string(exitErr.Stderr)))
+		}
+		return "", fmt.Errorf("go list %s: %w", importPath, err)
+	}
+	dir := strings.TrimSpace(string(out))
+	if dir == "" {
+		return "", fmt.Errorf("go list %s: returned empty directory", importPath)
+	}
+	return dir, nil
+}
+
+// envWithoutGOFLAGS returns the process environment with any GOFLAGS
+// entry stripped. Used when shelling out to `go list` / `go build`
+// inside a toolexec invocation so the subprocess doesn't recursively
+// trigger `-toolexec=rewire`.
+func envWithoutGOFLAGS() []string {
+	env := os.Environ()
+	filtered := env[:0]
+	for _, e := range env {
+		if !strings.HasPrefix(e, "GOFLAGS=") {
+			filtered = append(filtered, e)
+		}
+	}
+	return filtered
 }
 
 // resolveInterfaceSource is the InterfaceResolver implementation
@@ -728,16 +798,7 @@ func ensureStdImportsInCfg(args []string, pkgs ...string) ([]string, func(), err
 func resolveStdExportPaths(pkgs []string) (map[string]string, error) {
 	listArgs := append([]string{"list", "-export", "-f", "{{.ImportPath}}|{{.Export}}"}, pkgs...)
 	cmd := exec.Command("go", listArgs...)
-
-	// Strip GOFLAGS to avoid `go list` re-invoking rewire via toolexec.
-	env := os.Environ()
-	filtered := env[:0]
-	for _, e := range env {
-		if !strings.HasPrefix(e, "GOFLAGS=") {
-			filtered = append(filtered, e)
-		}
-	}
-	cmd.Env = filtered
+	cmd.Env = envWithoutGOFLAGS()
 
 	out, err := cmd.Output()
 	if err != nil {

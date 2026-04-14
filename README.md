@@ -160,7 +160,7 @@ No `go:generate` step. No `mock_*_test.go` files committed to the repo. The tool
 - Unstubbed methods return zero values.
 - `rewire.Restore(t, mock)` clears every stub on a mock.
 
-**Current scope:** non-generic and generic interfaces (any type-argument shape, including nested generics and external-package type args), embedded interfaces (same-file, same-package, cross-package, and generic embeds with type-parameter flow), and methods using bare same-package identifiers like `*Greeter` — the generator auto-qualifies them when synthesizing the backing struct into the test package. Each generic instantiation produces its own backing struct keyed by reflect's instantiation-aware type name.
+**Current scope:** non-generic and generic interfaces (any type-argument shape, including nested generics and external-package type args), embedded interfaces (same-file, same-package, cross-package, and generic embeds with type-parameter flow), and methods using bare same-package identifiers like `*Greeter` — the generator auto-qualifies them when synthesizing the backing struct into the test package. Package lookup goes through `go list`, so `replace` directives in `go.mod`, workspace files (`go.work`), and vendor directories all work as expected. Each generic instantiation produces its own backing struct keyed by reflect's instantiation-aware type name.
 
 See [Interface Mocks](docs/interface-mocks.md) for the full feature set.
 
@@ -305,7 +305,6 @@ Simpler, but `go build` now also runs through the rewire toolexec. The overhead 
 - **Bodyless functions** — functions implemented in assembly have no Go source to rewrite. Detected and rejected at compile time.
 - **Parallel mocks on the same target** — two `t.Parallel()` tests that mock the same function with different replacements will race on the package-level mock variable. Rewire is single-test-at-a-time per target.
 - **Interface mocks with dot imports** — an interface whose declaring file uses `import . "pkg"` can confuse the bare-type qualifier, since dotted names look like same-package references. Dot imports are rare and discouraged in practice.
-- **Module-aware package resolution** — `go/build.Import` doesn't respect `replace` directives, workspaces, or vendor directories when locating an interface's source.
 
 </details>
 

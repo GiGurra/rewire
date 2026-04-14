@@ -26,7 +26,6 @@ Functions implemented in assembly (no Go body) cannot be rewritten. These are ty
 ## Interface mocks (`rewire.NewMock[T]`)
 
 - **Dot imports in the interface's declaring file** — `import . "pkg"` brings package-level names into the file's top-level scope unqualified. The generator assumes any bare identifier in a method signature that isn't a predeclared type or a type parameter is a same-package type, which is wrong under a dot import. Dot imports are rare and discouraged; if you hit this, the generated file will fail to compile with a clear "undefined" error.
-- **Module-aware package resolution** — rewire resolves an interface's declaring package via `go/build.Import`, which doesn't respect `replace` directives in `go.mod`, workspace files, or vendor directories. Interfaces in packages reachable via standard `GOPATH`/module-mode resolution work; the less common cases don't yet.
 
 For the full list of supported shapes see [Interface Mocks](interface-mocks.md).
 

@@ -183,6 +183,7 @@ Design choices:
 - **Factory registry.** The generated file's `init()` registers a `func() any` factory keyed on the interface's fully-qualified name. `rewire.NewMock[I](t)` looks up the factory by `reflect.TypeFor[I]()`-derived key, calls it, and type-asserts back to `I`. Non-reflective at the hot path — factory lookup is O(1), struct construction is a plain `new`.
 - **Non-zero-size backing struct.** Go's spec explicitly permits pointers to distinct zero-size variables to compare equal, which would break per-instance dispatch since the sync.Map keys on receiver pointer identity. The generator emits `struct{ _ [1]byte }` to force distinct allocations to get distinct addresses. Load-bearing, documented in the generator source.
 - **Current scope.** Non-generic interfaces, generic interfaces with arbitrary type-argument shapes (builtins, slices, maps, pointers, external-package types, nested generic instantiations), embedded interfaces (same-file, same-package, cross-package — including generic embeds where the outer interface's type parameter flows into the embed), methods using imported types in their signatures, and methods referencing bare same-package types (auto-qualified with the declaring package alias via an AST walker that runs BEFORE substitution, using the interface's type parameter names as a skip set). Each generic instantiation produces its own backing struct keyed on `reflect.TypeFor[I]()`, and the scanner forwards per-instantiation import resolution from the test file so type args from packages the interface's declaring file doesn't import (e.g. `Container[time.Duration]`) work correctly. Embedded-interface walking uses an `InterfaceResolver` callback the toolexec wrapper injects; mockgen itself does no filesystem I/O.
+- **Module-aware package resolution.** Interface source lookup delegates to `go list -find -f '{{.Dir}}' <importpath>` (with `GOFLAGS` stripped so the subprocess doesn't recursively fire the toolexec). That gives rewire identical resolution semantics to the surrounding Go build system — `replace` directives in `go.mod`, workspace files (`go.work`), vendor directories, and module download locations all work out of the box. Stdlib packages take a fast path through `go/build.Default.Import` to skip the subprocess. Results are memoized per toolexec invocation.
 
 A standalone `rewire mock` CLI subcommand that wrote committed mock files used to coexist with the toolexec path. It was removed once the toolexec path covered the common ground; the toolexec route is now the sole interface-mocking entry point in rewire.
 
@@ -202,9 +203,7 @@ Generate an overlay JSON file mapping source files to rewritten versions. `gopls
 
 ### Interface mock Phase 2 (remaining work)
 
-Generic interfaces (Phase 2a), same-package bare type qualification (Phase 2b), and embedded interfaces (Phase 2c) are all shipped — see the `Current scope` note above. One milestone remains:
-
-- **Module-aware package resolution** — respect `replace` directives, workspace files, and vendor directories via `go list` rather than the current `go/build.Import` approach.
+Generic interfaces (Phase 2a), same-package bare type qualification (Phase 2b), embedded interfaces (Phase 2c), and module-aware package resolution (Phase 2d, via `go list -find`) are all shipped — see the `Current scope` note above. No further milestones are planned for the interface-mock generator at this time.
 
 ### Generic interfaces (shipped)
 
