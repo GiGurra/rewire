@@ -32,6 +32,9 @@ jobs:
       - name: Run unit tests (no toolexec)
         run: go test ./internal/... ./pkg/...
 
+      - name: Run unit tests with -race
+        run: go test -race ./internal/... ./pkg/...
+
       - name: Install rewire binary
         run: go install ./cmd/rewire/
 
@@ -41,6 +44,17 @@ jobs:
           # so we set our rewire-test GOCACHE before cleaning.
           GOCACHE="$HOME/.cache/rewire-test" go clean -cache
           GOFLAGS="-toolexec=rewire" GOCACHE="$HOME/.cache/rewire-test" go test ./example/... -count=1
+
+      - name: Run toolexec tests with -race
+        run: |
+          # Separate cache dir from the non-race run. Race-instrumented
+          # .a files have different cache keys, so they'd just bloat a
+          # shared cache rather than break anything, but isolating
+          # keeps the numbers clean. This step is regression protection
+          # for the importcfg fingerprint-mismatch bug we fixed by
+          # propagating -race/-msan/-asan to `go list -export`.
+          GOCACHE="$HOME/.cache/rewire-test-race" go clean -cache
+          GOFLAGS="-toolexec=rewire" GOCACHE="$HOME/.cache/rewire-test-race" go test -race ./example/... -count=1
 
       - name: Verify inlining of rewire wrappers
         run: scripts/check-inlining.sh
