@@ -216,3 +216,43 @@ Once the full feature scope has settled, a coherent cleanup of the public API su
 ### Parallel test safety
 
 Parallel tests that mock the same function race on the shared `Mock_` variable. Options considered: goroutine-local storage (not native in Go), per-test context threading (intrusive), or continuing to document the limitation. Not currently planned — most users hit this only when trying to shove two instance-scoped mocks into parallel tests, and those cases are already handled by `rewire.InstanceMethod` + per-receiver keying.
+
+## Why toolexec, and what we'd consider if it becomes insufficient
+
+toolexec is the blessed compiler-extension point in Go — stable API since Go 1.7, hooks directly into `go build` / `go test`, and lets us see exactly the source files the compiler sees. Every rewire feature we've built so far expresses cleanly as a source-level transformation, and source is the right abstraction for what we do: our rewrites survive inlining, cross-package boundaries, and Go version churn. We've deliberately avoided patterns that would require any lower-level access. This section records the alternatives we'd consider if toolexec ever stops being enough, and explains why we don't use them today.
+
+### Post-processing compiled output
+
+**What it is**: Let `compile` produce `.a` archive files normally, then modify the compiled object code.
+
+**Why not**: Binary patching. Modifying `.a` archives is platform-specific disassembly + symbol-table surgery, and you can't add new package-level variables (like our `Mock_Foo` symbols) because the compiler decided the object layout before you got the file. This is how runtime monkey-patching libraries work and it's notoriously fragile across Go versions, architectures, and build modes. We'd be trading a clean source rewrite for a dangerous binary rewrite.
+
+### A custom Go compiler fork
+
+**What it is**: Fork `cmd/compile`, add hooks for rewrite/injection passes, ship our own Go toolchain.
+
+**Why not**: Maintenance cost is enormous — Go releases twice a year and refactors compiler internals aggressively with no stability guarantees. User experience collapses too ("install our fork of Go" is a non-starter). And it buys us nothing: our modifications are all expressible in source code, so operating at source level is actually cleaner than IR/SSA, because source survives inlining decisions and cross-package boundaries in ways IR doesn't.
+
+### `-overlay` flag integration
+
+**What it is**: Go's `-overlay=<json>` flag maps original file paths to replacement content. Introduced for `gopls`, respected by `go build` / `go test` / the whole `go/packages` stack.
+
+**Why we don't use it today**: The overlay is a flat global map, but rewire's rewrites are per-compile-step variable — each test package wants its own generated registration file based on which `rewire.Func` / `rewire.NewMock` calls appear in *that* package's test files. A single global overlay can't express per-package variability.
+
+**Why it might come back**: If we ever want gopls to see our rewritten sources (so IDE autocomplete on `Mock_Foo` variables "just works"), overlay is the obvious mechanism. It doesn't have to replace toolexec — the two could complement each other, with toolexec handling per-compile variability and overlay handling the stable parts gopls cares about.
+
+### Build-system integration (Bazel, Please, Pants)
+
+**What it is**: Integrate at the build-system level rather than the compiler level. These tools have better caching than plain `go build`.
+
+**Why not**: Excludes plain-`go build` users, which is the vast majority. rewire is meant to be drop-in for any Go project; adopting it shouldn't require adopting Bazel.
+
+### Pre-build staged copy via `packages.Load`
+
+**What it is**: Skip the compiler integration entirely. `rewire build ./...` runs `packages.Load`, applies all rewrites to a staged copy of the module, then invokes `go test` against that copy. Some Go tools work this way (e.g. `go-mutesting`).
+
+**Why not**: Cleaner conceptual model, but duplicates the build tree, loses Go's incremental compile caching, and puts more memory pressure on large projects. Probably worse than toolexec in practice. The one scenario where it might win is if we needed `go/types`-level resolution for every package, which we don't.
+
+### Bottom line
+
+toolexec gives us everything we need without forcing users to adopt anything exotic. Future effort should go into making toolexec usage *faster* — caching, parallelism, smaller scan surface — rather than trying to get below it.
