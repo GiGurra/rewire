@@ -102,6 +102,7 @@ Supported today:
 - **Variadic parameters, multi-return, unnamed parameters**
 - **Multiple mocks of the same interface** — scoped independently via per-instance dispatch
 - **Multiple instantiations of the same generic interface** — `Container[int]` and `Container[string]` produce distinct backing structs and don't collide
+- **Embedded interfaces** — same-file, same-package, and cross-package embeds all work. The full promoted method set is materialized on the mock, including methods from stdlib embeds like `io.Reader`. Generic embeds where the outer interface's type parameter flows into the embed are supported (e.g. `Outer[U]` embedding `Base[U]` instantiated as `Outer[int]` gives a `Base[int]` method set).
 
 ```go
 // All of these work:
@@ -111,11 +112,22 @@ cs := rewire.NewMock[bar.Container[string]](t)         // distinct instantiation
 c  := rewire.NewMock[bar.Cache[string, int]](t)        // multi type args
 n  := rewire.NewMock[bar.Container[bar.Container[int]]](t)  // nested generic
 e  := rewire.NewMock[bar.Container[time.Duration]](t)  // external package type arg
+rc := rewire.NewMock[bar.ReadCloser](t)                // embeds io.Reader + same-pkg Named
+lr := rewire.NewMock[bar.ListRepo[int]](t)             // generic embed: ListRepo[U] embeds Base[U]
+```
+
+Stubbing a promoted method uses the OUTER interface as the receiver in the method expression — that's what Go's runtime reports for method expressions on types with embeds:
+
+```go
+rc := rewire.NewMock[bar.ReadCloser](t)
+// Read is promoted from io.Reader but stubbed via bar.ReadCloser.Read:
+rewire.InstanceMethod(t, rc, bar.ReadCloser.Read, func(r bar.ReadCloser, p []byte) (int, error) {
+    return copy(p, "hi"), nil
+})
 ```
 
 Not yet supported (rejected with clear errors):
 
-- Embedded interfaces (`io.ReadCloser` embeds `io.Reader` + `io.Closer`)
 - Types from the interface's own declaring package (e.g. a method returning `*Greeter` where `Greeter` is defined in the same package as `GreeterIface`)
 
 ### Trade-offs

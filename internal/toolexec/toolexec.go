@@ -367,7 +367,7 @@ func generateInterfaceMocks(compileArgs []string, tmpDir string) ([]string, func
 
 			alias := defaultPkgAlias(importPath)
 			for _, inst := range instances {
-				generated, err := mockgen.GenerateRewireMock(srcBytes, ifaceName, importPath, alias, pkgName, inst.TypeArgs, inst.TypeArgImports)
+				generated, err := mockgen.GenerateRewireMock(srcBytes, ifaceName, importPath, alias, pkgName, inst.TypeArgs, inst.TypeArgImports, resolveInterfaceSource)
 				if err != nil {
 					return nil, nil, fmt.Errorf("generating mock for %s.%s%s: %w", importPath, ifaceName, formatTypeArgs(inst.TypeArgs), err)
 				}
@@ -423,6 +423,24 @@ func resolvePackageDir(importPath string) (string, error) {
 		return "", fmt.Errorf("package %s has no resolved directory", importPath)
 	}
 	return pkg.Dir, nil
+}
+
+// resolveInterfaceSource is the InterfaceResolver implementation
+// plumbed into mockgen.GenerateRewireMock. Given a package import path
+// and an interface name, it locates the package's source directory
+// (via go/build) and returns the raw bytes of whichever .go file in
+// that directory declares the interface.
+//
+// Used by mockgen to walk embedded interface chains: for an embed like
+// `io.Reader`, mockgen asks this resolver for ("io", "Reader") and
+// gets back the contents of io/io.go (or whichever file declares
+// Reader in the io package).
+func resolveInterfaceSource(importPath, interfaceName string) ([]byte, error) {
+	pkgDir, err := resolvePackageDir(importPath)
+	if err != nil {
+		return nil, err
+	}
+	return readInterfaceSource(pkgDir, interfaceName)
 }
 
 // readInterfaceSource finds the .go file in pkgDir that declares

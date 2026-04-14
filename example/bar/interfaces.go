@@ -48,6 +48,37 @@ type CacheIface[K comparable, V any] interface {
 	Get(k K) (V, bool)
 }
 
+// Named is a tiny same-file embed target.
+type Named interface {
+	Name() string
+}
+
+// ReadCloser is an interface whose method set is composed entirely of
+// methods promoted from embedded interfaces — one from the stdlib
+// (io.Reader) and one declared next door (Named). Used to exercise
+// the embedded-interface path in mockgen: the generated backing struct
+// must implement Read (from io.Reader, another package) AND Name
+// (from Named, same package, same file).
+type ReadCloser interface {
+	io.Reader
+	Named
+	Close() error
+}
+
+// Base is a generic same-file interface used as an embed target.
+// Its type parameter propagates into the promoted method.
+type Base[T any] interface {
+	Load(id int) T
+}
+
+// ListRepo embeds Base[T] with its own U type parameter flowing into
+// the embed. Exercises the generic-embed type-parameter flow — Outer's
+// U must become Base's T when we instantiate e.g. ListRepo[int].
+type ListRepo[U any] interface {
+	Base[U]
+	List() []U
+}
+
 // Repository is the canonical generic data-access interface — the
 // shape you'd expect to find in any real Go service. It exists in the
 // example package to demonstrate rewire.NewMock with a "production

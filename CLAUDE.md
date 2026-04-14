@@ -5,7 +5,7 @@
 Rewire is a Go test mocking tool with two modes that share one toolexec pipeline:
 
 1. **Function/method mocking (`rewire.Func` + toolexec)**: Uses `-toolexec` to intercept compilation and rewrite functions at compile time. Scans `_test.go` files for `rewire.Func` calls, builds a targeted list, and rewrites only those during compilation. Production source is never modified.
-2. **Interface mock synthesis (`rewire.NewMock[T]` + toolexec)**: Same toolexec pipeline. Scans test files for `rewire.NewMock[I]` references, locates I's source, and synthesizes a backing struct at compile time. No `go:generate`, no committed files. Handles non-generic AND generic interfaces (arbitrary type-arg shapes including external-package types and nested generics). Embedded interfaces and types from the interface's declaring package are still rejected with clear errors.
+2. **Interface mock synthesis (`rewire.NewMock[T]` + toolexec)**: Same toolexec pipeline. Scans test files for `rewire.NewMock[I]` references, locates I's source, and synthesizes a backing struct at compile time. No `go:generate`, no committed files. Handles non-generic AND generic interfaces (arbitrary type-arg shapes including external-package types and nested generics) AND embedded interfaces (same-file, same-package, cross-package — including generic embeds where the outer's type parameter flows into the embed, walked via an `InterfaceResolver` callback the toolexec wrapper injects). Types from the interface's declaring package referenced as bare identifiers are still rejected with clear errors.
 
 Inspired by Erlang's meck.
 

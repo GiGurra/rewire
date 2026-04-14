@@ -10,6 +10,38 @@ import (
 	"strings"
 )
 
+// InterfaceResolver resolves an embedded interface reference to its
+// source bytes. Given the import path of the package that declares the
+// interface and its bare name, it returns the raw bytes of the .go file
+// in that package that contains the interface declaration.
+//
+// Used by GenerateRewireMock to walk embedded interface chains — both
+// same-package (other files) and cross-package (e.g. io.Reader). The
+// mockgen package deliberately does no filesystem I/O itself; all
+// package/file lookup happens in the resolver the toolexec wrapper
+// supplies.
+//
+// May be nil when no embed resolution is needed (non-embedding
+// interfaces, or when the only embeds are in the current file). If a
+// cross-file embed is encountered and the resolver is nil,
+// GenerateRewireMock returns a clear error.
+type InterfaceResolver func(importPath, interfaceName string) ([]byte, error)
+
+// flatMethod is an interface method flattened with any type-parameter
+// substitutions already applied. Own methods and promoted (embedded)
+// methods become flatMethod values in a single flat list.
+//
+// Each flatMethod carries its own fset and fileImports because embedded
+// methods originate in a different file — possibly a different package
+// — than the root interface. nodeToString uses the fset; the caller
+// resolves package-selector imports via fileImports.
+type flatMethod struct {
+	name        string
+	funcType    *ast.FuncType     // post-substitution
+	fset        *token.FileSet    // fset owning funcType's positions
+	fileImports map[string]string // local name → import path from the originating file
+}
+
 // GenerateRewireMock produces a Go source file for the test package
 // `outputPkg` that declares a concrete backing struct implementing the
 // interface `interfaceName` (resolved from `src`). The generated
@@ -20,10 +52,6 @@ import (
 // The generated file is injected into the test package's compile args
 // by the toolexec wrapper — it never lives on disk, never appears in
 // go generate output, and has no effect on production source.
-//
-// Phase 2a scope: non-generic interfaces AND generic interfaces with
-// concrete type-argument instantiations. Embedded interfaces and types
-// from the interface's own declaring package are still rejected.
 //
 // Inputs:
 //   - src: source bytes of the file in the declaring package that
@@ -40,44 +68,28 @@ import (
 //   - typeArgs: the type-argument source strings for the instantiation
 //     this mock represents (e.g. ["int"] for ContainerIface[int]).
 //     Empty / nil for non-generic interfaces. Each entry is a printed
-//     Go source expression as the user wrote it in the test file
-//     (e.g. "context.Context", "*time.Time").
+//     Go source expression as the user wrote it in the test file.
 //   - typeArgImports: local-name → import-path map for any package
 //     selectors that appear in the type-arg expressions, derived from
-//     the test file's own imports. Used to emit the right import
-//     declarations in the generated mock file when the type args
-//     reference packages the interface's declaring file doesn't
-//     import (e.g. ContainerIface[time.Duration]). Nil/empty if the
-//     type args reference only builtins or types from the interface's
-//     declaring package.
-func GenerateRewireMock(src []byte, interfaceName, interfacePkgPath, interfacePkgAlias, outputPkg string, typeArgs []string, typeArgImports map[string]string) ([]byte, error) {
+//     the test file's own imports.
+//   - resolver: used to fetch source for embedded interfaces that are
+//     not declared in `src`. Nil is acceptable when the interface has
+//     no embeds (or only same-file embeds).
+func GenerateRewireMock(
+	src []byte,
+	interfaceName, interfacePkgPath, interfacePkgAlias, outputPkg string,
+	typeArgs []string,
+	typeArgImports map[string]string,
+	resolver InterfaceResolver,
+) ([]byte, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "", src, parser.ParseComments)
 	if err != nil {
 		return nil, fmt.Errorf("parsing source: %w", err)
 	}
 
-	var iface *ast.InterfaceType
-	var ifaceTypeParams *ast.FieldList
-	for _, decl := range file.Decls {
-		genDecl, ok := decl.(*ast.GenDecl)
-		if !ok {
-			continue
-		}
-		for _, spec := range genDecl.Specs {
-			typeSpec, ok := spec.(*ast.TypeSpec)
-			if !ok || typeSpec.Name.Name != interfaceName {
-				continue
-			}
-			ifaceType, ok := typeSpec.Type.(*ast.InterfaceType)
-			if !ok {
-				return nil, fmt.Errorf("%q is not an interface", interfaceName)
-			}
-			iface = ifaceType
-			ifaceTypeParams = typeSpec.TypeParams
-		}
-	}
-	if iface == nil {
+	iface, ifaceTypeParams, ok := findInterface(file, interfaceName)
+	if !ok {
 		return nil, fmt.Errorf("interface %q not found", interfaceName)
 	}
 
@@ -94,96 +106,94 @@ func GenerateRewireMock(src []byte, interfaceName, interfacePkgPath, interfacePk
 		return nil, fmt.Errorf("interface %q expects %d type argument(s) but received %d (%v)", interfaceName, declaredTypeParams, len(typeArgs), typeArgs)
 	}
 
-	// Build the type-parameter substitution map: T -> "int", U -> "string", etc.
-	// Each value is the type-argument source string as the user wrote
-	// it in the test file. Substitution happens by walking method
-	// signatures and replacing any *ast.Ident referencing a type
-	// parameter with a parsed expression of the type-arg source.
-	typeParamSubst := map[string]ast.Expr{}
-	if declaredTypeParams > 0 {
-		idx := 0
-		for _, field := range ifaceTypeParams.List {
-			for _, name := range field.Names {
-				argExpr, parseErr := parser.ParseExpr(typeArgs[idx])
-				if parseErr != nil {
-					return nil, fmt.Errorf("parsing type argument %q for interface %q: %w", typeArgs[idx], interfaceName, parseErr)
-				}
-				typeParamSubst[name.Name] = argExpr
-				idx++
-			}
+	// Parse each typeArg source string into an ast.Expr once, at the
+	// root level. These parsed expressions flow through the recursive
+	// embed walker so nested substitutions see concrete AST nodes.
+	rootTypeArgExprs := make([]ast.Expr, len(typeArgs))
+	for i, s := range typeArgs {
+		expr, parseErr := parser.ParseExpr(s)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parsing type argument %q for interface %q: %w", s, interfaceName, parseErr)
 		}
+		rootTypeArgExprs[i] = expr
 	}
 
-	// Build import map from the declaring package's file: local name → import path.
-	// Used to emit only the imports that are actually referenced in method signatures.
-	imports := map[string]string{}
-	for _, imp := range file.Imports {
-		importPath := strings.Trim(imp.Path.Value, `"`)
-		var localName string
-		if imp.Name != nil {
-			localName = imp.Name.Name
-		} else {
-			segments := strings.Split(importPath, "/")
-			localName = segments[len(segments)-1]
+	visited := map[string]bool{
+		interfacePkgPath + "." + interfaceName: true,
+	}
+	flat, err := collectFlatMethods(
+		iface, ifaceTypeParams, rootTypeArgExprs,
+		fset, file,
+		interfacePkgPath,
+		resolver, visited,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("collecting methods for interface %q: %w", interfaceName, err)
+	}
+
+	// Dedupe by method name. Go requires interfaces with overlapping
+	// embeds to declare identical signatures, so taking the first
+	// occurrence is equivalent to taking either — matches the way Go
+	// itself resolves promoted methods.
+	{
+		seen := map[string]bool{}
+		out := flat[:0]
+		for _, m := range flat {
+			if seen[m.name] {
+				continue
+			}
+			seen[m.name] = true
+			out = append(out, m)
 		}
-		imports[localName] = importPath
+		flat = out
 	}
 
 	type method struct {
-		name          string
-		params        string // "name string, age int"
-		results       string // "(string, error)" or "string" or ""
-		namedResults  string // "(_r0 string)" — for zero-return bare-return style
-		paramNames    string // "name, age"
-		hasResults    bool
-		mockFnType    string // user-replacement func type: "func(bar.GreeterIface, string) string"
+		name         string
+		params       string // "name string, age int"
+		results      string // "(string, error)" or "string" or ""
+		namedResults string // "(_r0 string)" — for zero-return bare-return style
+		paramNames   string // "name, age"
+		hasResults   bool
+		mockFnType   string // user-replacement func type: "func(bar.GreeterIface, string) string"
+		pkgRefs      map[string]bool
+		fileImports  map[string]string
 	}
 
 	var methods []method
-	usedPkgs := map[string]bool{}
 
-	for _, field := range iface.Methods.List {
-		funcType, ok := field.Type.(*ast.FuncType)
-		if !ok || len(field.Names) == 0 {
-			return nil, fmt.Errorf("interface %q has an embedded interface or non-method field — embedded interfaces are not yet supported", interfaceName)
-		}
-		methodName := field.Names[0].Name
+	for _, fm := range flat {
+		isVariadic := isVariadicFunc(fm.funcType)
+		params := ensureParamNames(fm.funcType.Params)
 
-		// For generic interfaces, substitute type-parameter references
-		// in the method signature with the concrete type arguments
-		// before printing. This produces a method declaration that
-		// matches what Go's type system materializes for the
-		// instantiation. For non-generic interfaces, substituteFuncType
-		// returns the original FuncType unchanged.
-		instantiatedFuncType := substituteFuncType(funcType, typeParamSubst)
-		isVariadic := isVariadicFunc(instantiatedFuncType)
-		params := ensureParamNames(instantiatedFuncType.Params)
-
-		paramsSrc := fieldListToString(fset, params)
+		paramsSrc := fieldListToString(fm.fset, params)
 		paramNamesSrc := buildCallArgs(params, isVariadic)
-		hasResults := instantiatedFuncType.Results != nil && len(instantiatedFuncType.Results.List) > 0
+		hasResults := fm.funcType.Results != nil && len(fm.funcType.Results.List) > 0
 		resultsSrc := ""
 		namedResultsSrc := ""
 		if hasResults {
-			resultsSrc = resultsToString(fset, instantiatedFuncType.Results)
-			namedResultsSrc = addResultNames(fset, resultsSrc)
+			resultsSrc = resultsToString(fm.fset, fm.funcType.Results)
+			namedResultsSrc = addResultNames(fm.fset, resultsSrc)
 		}
 
 		// Track packages referenced in the (post-substitution) method
-		// signature so we can emit only the imports we actually need.
-		// Substitution might have brought in package selectors from
-		// the test file's type-arg expressions (e.g. context.Context).
-		collectPkgRefs(instantiatedFuncType, usedPkgs)
+		// signature. These come from the method's originating file —
+		// for own methods that's the root file, for promoted methods
+		// that's the embed's file.
+		pkgRefs := map[string]bool{}
+		collectPkgRefs(fm.funcType, pkgRefs)
 
-		// The replacement function type, seen from the test author's
+		// The replacement function type seen from the test author's
 		// perspective: receiver is the interface type (with alias and
 		// instantiated type args, if any), followed by the method's
-		// parameters (types only).
+		// parameters (types only). Receiver always uses the ROOT
+		// interface's alias — promoted methods are still bound to the
+		// outer type in Go's view.
 		replRecv := interfacePkgAlias + "." + interfaceName
 		if len(typeArgs) > 0 {
 			replRecv += "[" + strings.Join(typeArgs, ", ") + "]"
 		}
-		paramTypesOnly := typeOnlyFieldList(fset, params)
+		paramTypesOnly := typeOnlyFieldList(fm.fset, params)
 		mockFnParams := replRecv
 		if paramTypesOnly != "" {
 			mockFnParams += ", " + paramTypesOnly
@@ -194,13 +204,15 @@ func GenerateRewireMock(src []byte, interfaceName, interfacePkgPath, interfacePk
 		}
 
 		methods = append(methods, method{
-			name:         methodName,
+			name:         fm.name,
 			params:       paramsSrc,
 			results:      resultsSrc,
 			namedResults: namedResultsSrc,
 			paramNames:   paramNamesSrc,
 			hasResults:   hasResults,
 			mockFnType:   mockFnType,
+			pkgRefs:      pkgRefs,
+			fileImports:  fm.fileImports,
 		})
 	}
 
@@ -227,8 +239,7 @@ func GenerateRewireMock(src []byte, interfaceName, interfacePkgPath, interfacePk
 	// addImport calls don't emit the same line twice. We track both
 	// the alias (so we don't import two packages under the same local
 	// name) and the import path (so the same package isn't imported
-	// twice under different aliases — Go would accept this but it's
-	// noise in the generated source).
+	// twice under different aliases).
 	var usedImports []string
 	importedAliases := map[string]bool{}
 	importedPaths := map[string]bool{}
@@ -255,26 +266,29 @@ func GenerateRewireMock(src []byte, interfaceName, interfacePkgPath, interfacePk
 	addImport("sync", "")
 	addImport("github.com/GiGurra/rewire/pkg/rewire", "")
 	addImport(interfacePkgPath, interfacePkgAlias)
-	// Imports referenced by method signatures. Resolution order:
+
+	// Resolve imports referenced by each method's signature. Per-method
+	// resolution order:
 	//
 	//   1. typeArgImports — packages referenced by the test file's
 	//      type-arg expressions (e.g. "time" → "time" when the user
-	//      wrote ContainerIface[time.Duration]). The test file knows
-	//      about these via its own imports; the interface's declaring
-	//      file may not.
+	//      wrote ContainerIface[time.Duration]). Applies uniformly to
+	//      substituted identifiers in any method, own or promoted.
 	//
-	//   2. imports — the interface's declaring file's imports. Used
-	//      for any package selectors the original method signatures
-	//      reference (e.g. context.Context, io.Reader).
-	//
-	// addImport handles dedup against everything already added above.
-	for localName := range usedPkgs {
-		if path, ok := typeArgImports[localName]; ok {
-			addImport(path, localName)
-			continue
-		}
-		if path, ok := imports[localName]; ok {
-			addImport(path, localName)
+	//   2. method.fileImports — the originating file's imports. For own
+	//      methods that's the root file; for promoted methods it's the
+	//      embed's file. Covers package selectors that were already
+	//      present in the method signature before substitution (e.g.
+	//      context.Context in io.ReaderAt).
+	for _, m := range methods {
+		for localName := range m.pkgRefs {
+			if path, ok := typeArgImports[localName]; ok {
+				addImport(path, localName)
+				continue
+			}
+			if path, ok := m.fileImports[localName]; ok {
+				addImport(path, localName)
+			}
 		}
 	}
 	sort.Strings(usedImports)
@@ -333,13 +347,14 @@ func GenerateRewireMock(src []byte, interfaceName, interfacePkgPath, interfacePk
 	// parameter flows the interface (instantiated for generics) through
 	// to reflect at runtime, which derives the registry key from
 	// PkgPath()+"."+Name(). Same derivation NewMock[I] uses at lookup
-	// time, so the keys can never drift. The generated file doesn't
-	// need to import reflect.
+	// time, so the keys can never drift.
 	//
-	// For generic instantiations the type parameter is the instantiated
-	// form, e.g. RegisterMockFactory[bar.ContainerIface[int]](...). At
-	// runtime reflect.TypeFor produces "ContainerIface[int]" as the
-	// type's Name(), so each instantiation gets a distinct factory.
+	// For promoted methods, the registry key uses the ROOT interface
+	// name, not the embed's interface name. That matches what
+	// runtime.FuncForPC reports for method expressions on the outer
+	// interface: `pkg.Outer.Method`, even when Method is promoted from
+	// an embed like io.Reader. Users stub as bar.Outer.Read, and that
+	// resolves to pkg.Outer.Read at runtime.
 	fullIfaceName := interfacePkgPath + "." + interfaceName
 	instantiatedIface := interfacePkgAlias + "." + interfaceName
 	if len(typeArgs) > 0 {
@@ -364,6 +379,261 @@ func GenerateRewireMock(src []byte, interfaceName, interfacePkgPath, interfacePk
 		return nil, fmt.Errorf("formatting generated rewire mock (this is a bug in rewire):\n%s\nerror: %w", b.String(), err)
 	}
 	return formatted, nil
+}
+
+// collectFlatMethods walks iface's own methods and any embedded
+// interfaces (recursively) and returns a flat list of methods with the
+// current substitution applied.
+//
+//   - typeArgs is the already-substituted list of ast.Exprs
+//     representing the instantiation of iface's type parameters as
+//     seen from the root caller's perspective.
+//   - fset + file describe the source iface was parsed from; used for
+//     printing and for this file's imports.
+//   - pkgPath is iface's declaring package import path; used for
+//     visited-set keys and for resolving same-package embeds.
+//   - resolver is used to fetch source for embeds that aren't declared
+//     in `file`. May be nil; cross-file embeds error clearly when nil.
+//   - visited guards against cycles (Go rejects embed cycles, but
+//     defensive anyway).
+func collectFlatMethods(
+	iface *ast.InterfaceType,
+	typeParams *ast.FieldList,
+	typeArgs []ast.Expr,
+	fset *token.FileSet,
+	file *ast.File,
+	pkgPath string,
+	resolver InterfaceResolver,
+	visited map[string]bool,
+) ([]flatMethod, error) {
+	// Build the type-parameter substitution for this level: T → <expr>,
+	// K → <expr>, etc. For non-generic interfaces the subst is empty
+	// and substituteFuncType is a no-op.
+	subst := map[string]ast.Expr{}
+	if typeParams != nil && len(typeArgs) > 0 {
+		idx := 0
+		for _, field := range typeParams.List {
+			for _, name := range field.Names {
+				if idx >= len(typeArgs) {
+					return nil, fmt.Errorf("type-argument arity mismatch: interface declares %d type parameters but received %d arguments",
+						typeParams.NumFields(), len(typeArgs))
+				}
+				subst[name.Name] = typeArgs[idx]
+				idx++
+			}
+		}
+	}
+
+	fileImports := buildFileImports(file)
+
+	var out []flatMethod
+
+	for _, field := range iface.Methods.List {
+		// Own method: named field with a function-type body.
+		if len(field.Names) > 0 {
+			funcType, ok := field.Type.(*ast.FuncType)
+			if !ok {
+				return nil, fmt.Errorf("unexpected non-function interface field %q", field.Names[0].Name)
+			}
+			out = append(out, flatMethod{
+				name:        field.Names[0].Name,
+				funcType:    substituteFuncType(funcType, subst),
+				fset:        fset,
+				fileImports: fileImports,
+			})
+			continue
+		}
+
+		// Embedded interface: names is empty, type is a reference.
+		embed, err := parseEmbedRef(field.Type)
+		if err != nil {
+			return nil, err
+		}
+
+		// Resolve embed's declaring package. If it's a same-package
+		// reference, we look first in our already-parsed file, then
+		// (if not found there) fall back to the resolver for other
+		// files in the same package.
+		embedPkgPath := embed.pkgPath
+		if embedPkgPath == "" {
+			embedPkgPath = pkgPath
+		} else {
+			// Cross-package reference: the embed.pkgPath we parsed is
+			// actually just a local alias (like "io" in "io.Reader").
+			// Resolve it to an import path via the current file's
+			// imports.
+			path, ok := fileImports[embed.pkgPath]
+			if !ok {
+				return nil, fmt.Errorf("embedded interface %s.%s references package alias %q that is not imported in the declaring file",
+					embed.pkgPath, embed.ifaceName, embed.pkgPath)
+			}
+			embedPkgPath = path
+		}
+
+		visitKey := embedPkgPath + "." + embed.ifaceName
+		if visited[visitKey] {
+			continue
+		}
+
+		// Apply the current level's substitution to the embed's type
+		// arguments before recursing. For Outer[U] embedding Base[U],
+		// with U → int, Base gets called with type args [int].
+		substitutedEmbedArgs := make([]ast.Expr, len(embed.typeArgExprs))
+		for i, expr := range embed.typeArgExprs {
+			substitutedEmbedArgs[i] = substTypeExpr(expr, subst)
+		}
+
+		// Locate the embed's AST: either already in our file (same
+		// package, same file) or fetched via resolver.
+		var (
+			embedFset  *token.FileSet
+			embedFile  *ast.File
+			embedIface *ast.InterfaceType
+			embedTP    *ast.FieldList
+		)
+		if embed.pkgPath == "" {
+			// Same package. Try this file first.
+			if ifType, tp, ok := findInterface(file, embed.ifaceName); ok {
+				embedFset = fset
+				embedFile = file
+				embedIface = ifType
+				embedTP = tp
+			}
+		}
+
+		if embedIface == nil {
+			if resolver == nil {
+				return nil, fmt.Errorf("embedded interface %s.%s: cannot resolve without an InterfaceResolver (needed for cross-file or cross-package embeds)",
+					embedPkgPath, embed.ifaceName)
+			}
+			src, err := resolver(embedPkgPath, embed.ifaceName)
+			if err != nil {
+				return nil, fmt.Errorf("resolving embedded interface %s.%s: %w", embedPkgPath, embed.ifaceName, err)
+			}
+			efs := token.NewFileSet()
+			ef, err := parser.ParseFile(efs, "", src, parser.ParseComments)
+			if err != nil {
+				return nil, fmt.Errorf("parsing embedded interface source for %s.%s: %w", embedPkgPath, embed.ifaceName, err)
+			}
+			ifType, tp, ok := findInterface(ef, embed.ifaceName)
+			if !ok {
+				return nil, fmt.Errorf("embedded interface %s.%s not found in resolved source", embedPkgPath, embed.ifaceName)
+			}
+			embedFset = efs
+			embedFile = ef
+			embedIface = ifType
+			embedTP = tp
+		}
+
+		// Mark visited before the recursive call so mutually-embedding
+		// interfaces can't spin forever (Go forbids this but defense in
+		// depth is cheap).
+		visited[visitKey] = true
+
+		nested, err := collectFlatMethods(
+			embedIface, embedTP, substitutedEmbedArgs,
+			embedFset, embedFile,
+			embedPkgPath, resolver, visited,
+		)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, nested...)
+	}
+
+	return out, nil
+}
+
+// findInterface locates a top-level interface declaration by name in
+// file. Returns the InterfaceType, its TypeParams (nil for non-generic),
+// and whether it was found.
+func findInterface(file *ast.File, name string) (*ast.InterfaceType, *ast.FieldList, bool) {
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			ts, ok := spec.(*ast.TypeSpec)
+			if !ok || ts.Name.Name != name {
+				continue
+			}
+			iface, ok := ts.Type.(*ast.InterfaceType)
+			if !ok {
+				return nil, nil, false
+			}
+			return iface, ts.TypeParams, true
+		}
+	}
+	return nil, nil, false
+}
+
+// buildFileImports returns the map of local-name → import-path for a
+// parsed file.
+func buildFileImports(file *ast.File) map[string]string {
+	out := map[string]string{}
+	for _, imp := range file.Imports {
+		importPath := strings.Trim(imp.Path.Value, `"`)
+		var localName string
+		if imp.Name != nil {
+			localName = imp.Name.Name
+		} else {
+			localName = defaultPkgAlias(importPath)
+		}
+		out[localName] = importPath
+	}
+	return out
+}
+
+// embedRef describes a single embedded-interface reference parsed from
+// an ast.Field.Type expression.
+//
+//	pkgPath == ""       same-package embed (Reader, Base[T])
+//	pkgPath == "io"     cross-package embed (io.Reader, pkg.Base[T])
+//	                    — value is the LOCAL alias, not the import path
+//	ifaceName           the embedded interface's bare name
+//	typeArgExprs        parsed type-arg expressions (empty for non-generic)
+type embedRef struct {
+	pkgPath      string
+	ifaceName    string
+	typeArgExprs []ast.Expr
+}
+
+// parseEmbedRef decodes an embedded-interface reference expression.
+// Supports all forms Go allows in an interface embed position:
+//
+//	Reader                  → ident
+//	io.Reader               → selector
+//	Base[T]                 → index (same pkg, 1 type arg)
+//	io.Base[T]              → index (cross pkg, 1 type arg)
+//	Base[K, V]              → indexList (same pkg, multi type args)
+//	io.Base[K, V]           → indexList (cross pkg, multi type args)
+func parseEmbedRef(expr ast.Expr) (embedRef, error) {
+	switch e := expr.(type) {
+	case *ast.Ident:
+		return embedRef{ifaceName: e.Name}, nil
+	case *ast.SelectorExpr:
+		pkgIdent, ok := e.X.(*ast.Ident)
+		if !ok {
+			return embedRef{}, fmt.Errorf("unsupported embedded selector form: %T", e.X)
+		}
+		return embedRef{pkgPath: pkgIdent.Name, ifaceName: e.Sel.Name}, nil
+	case *ast.IndexExpr:
+		base, err := parseEmbedRef(e.X)
+		if err != nil {
+			return embedRef{}, err
+		}
+		base.typeArgExprs = []ast.Expr{e.Index}
+		return base, nil
+	case *ast.IndexListExpr:
+		base, err := parseEmbedRef(e.X)
+		if err != nil {
+			return embedRef{}, err
+		}
+		base.typeArgExprs = append([]ast.Expr(nil), e.Indices...)
+		return base, nil
+	}
+	return embedRef{}, fmt.Errorf("unsupported embedded-interface form: %T", expr)
 }
 
 // commaPrepend returns ", s" if s is non-empty, or "" otherwise.
@@ -392,11 +662,9 @@ func defaultPkgAlias(path string) string {
 //	["map[string]int"]      → "map_string_int_"
 //
 // The mangling is intentionally lossy — distinct user-visible types
-// can collide if they share the same mangled form (e.g. `map[K]V` and
-// `[]V` once stripped). For Phase 2a's scope (builtin/imported type
-// args) collisions are very unlikely in practice; if they occur, the
-// generated file would fail to compile because two structs with the
-// same name would be declared, which surfaces the problem clearly.
+// can collide if they share the same mangled form. If they do, the
+// generated file fails to compile because two structs with the same
+// name would be declared, which surfaces the problem clearly.
 func mangleTypeArgsForIdent(typeArgs []string) string {
 	if len(typeArgs) == 0 {
 		return ""
@@ -421,13 +689,6 @@ func mangleTypeArgsForIdent(typeArgs []string) string {
 //
 // For non-generic interfaces (subst empty) this returns funcType
 // unchanged — no allocation, no walk.
-//
-// The walk handles all type expression forms used in method
-// signatures: identifiers, pointers, slices, maps, channels, function
-// types, ellipsis (variadic), generic instantiations (IndexExpr /
-// IndexListExpr), and qualified selectors. Selectors like
-// `context.Context` are passed through unchanged because their X
-// component is a package identifier, not a type parameter.
 func substituteFuncType(funcType *ast.FuncType, subst map[string]ast.Expr) *ast.FuncType {
 	if len(subst) == 0 {
 		return funcType

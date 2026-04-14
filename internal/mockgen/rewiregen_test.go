@@ -1,6 +1,7 @@
 package mockgen
 
 import (
+	"fmt"
 	"go/parser"
 	"go/token"
 	"strings"
@@ -14,7 +15,7 @@ type GreeterIface interface {
 	Greet(name string) string
 }
 `)
-	out, err := GenerateRewireMock(src, "GreeterIface", "github.com/example/bar", "bar", "footest", nil, nil)
+	out, err := GenerateRewireMock(src, "GreeterIface", "github.com/example/bar", "bar", "footest", nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +57,7 @@ type Logger interface {
 	Logf(format string, args ...any)
 }
 `)
-	out, err := GenerateRewireMock(src, "Logger", "example/logpkg", "logpkg", "footest", nil, nil)
+	out, err := GenerateRewireMock(src, "Logger", "example/logpkg", "logpkg", "footest", nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +85,9 @@ type Logger interface {
 	}
 }
 
-func TestGenerateRewireMock_RejectsEmbedded(t *testing.T) {
+// Same-file, same-package embed — the method set flattens: Read and
+// Close are promoted from the embedded interface, Name is own.
+func TestGenerateRewireMock_EmbedSameFile(t *testing.T) {
 	src := []byte(`package bar
 
 type ReaderCloser interface {
@@ -97,12 +100,148 @@ type Bigger interface {
 	Name() string
 }
 `)
-	_, err := GenerateRewireMock(src, "Bigger", "example/bar", "bar", "footest", nil, nil)
-	if err == nil {
-		t.Fatal("expected error for embedded interface")
+	out, err := GenerateRewireMock(src, "Bigger", "example/bar", "bar", "footest", nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "embedded") {
-		t.Errorf("expected error mentioning embedded, got: %v", err)
+	result := string(out)
+	t.Log("Generated:\n" + result)
+
+	fset := token.NewFileSet()
+	if _, err := parser.ParseFile(fset, "", result, parser.ParseComments); err != nil {
+		t.Fatalf("generated source does not parse: %v\n%s", err, result)
+	}
+
+	// All three methods must be present — the receiver is always the
+	// ROOT interface (Bigger), even for promoted methods.
+	mustContain := []string{
+		`func (m *_rewire_mock_bar_Bigger) Read(p []byte) (_r0 int, _r1 error)`,
+		`func (m *_rewire_mock_bar_Bigger) Close() (_r0 error)`,
+		`func (m *_rewire_mock_bar_Bigger) Name() (_r0 string)`,
+		// Registration uses Bigger, not ReaderCloser — runtime.FuncForPC
+		// reports method expressions as `pkg.Outer.Method` even for
+		// promoted methods.
+		`rewire.RegisterByInstance("example/bar.Bigger.Read"`,
+		`rewire.RegisterByInstance("example/bar.Bigger.Close"`,
+		`rewire.RegisterByInstance("example/bar.Bigger.Name"`,
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(result, s) {
+			t.Errorf("expected output to contain %q\n---\n%s", s, result)
+		}
+	}
+}
+
+// Cross-file / cross-package embed via a stub resolver. Simulates
+// embedding io.Reader without actually reading the stdlib — mockgen
+// asks the resolver for (pkgPath, ifaceName) and gets back synthetic
+// source.
+func TestGenerateRewireMock_EmbedCrossPackage(t *testing.T) {
+	rootSrc := []byte(`package bar
+
+import "extio"
+
+type Closeable interface {
+	extio.Reader
+	Close() error
+}
+`)
+	resolver := func(importPath, ifaceName string) ([]byte, error) {
+		if importPath != "extio" || ifaceName != "Reader" {
+			return nil, fmt.Errorf("unexpected resolver call: %s.%s", importPath, ifaceName)
+		}
+		return []byte(`package extio
+
+type Reader interface {
+	Read(p []byte) (n int, err error)
+}
+`), nil
+	}
+	out, err := GenerateRewireMock(rootSrc, "Closeable", "example/bar", "bar", "footest", nil, nil, resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+	t.Log("Generated:\n" + result)
+
+	fset := token.NewFileSet()
+	if _, err := parser.ParseFile(fset, "", result, parser.ParseComments); err != nil {
+		t.Fatalf("generated source does not parse: %v\n%s", err, result)
+	}
+
+	mustContain := []string{
+		`func (m *_rewire_mock_bar_Closeable) Read(p []byte) (_r0 int, _r1 error)`,
+		`func (m *_rewire_mock_bar_Closeable) Close() (_r0 error)`,
+		// The registration keys use the OUTER interface's pkgPath and
+		// name, not extio.Reader's.
+		`rewire.RegisterByInstance("example/bar.Closeable.Read"`,
+		`rewire.RegisterByInstance("example/bar.Closeable.Close"`,
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(result, s) {
+			t.Errorf("expected output to contain %q\n---\n%s", s, result)
+		}
+	}
+}
+
+// Generic embed with type-parameter flow: Outer[U] embeds Base[U], so
+// the promoted method's type arg propagates from Outer to Base.
+func TestGenerateRewireMock_EmbedGenericFlow(t *testing.T) {
+	src := []byte(`package bar
+
+type Base[T any] interface {
+	Get(id int) T
+}
+
+type Outer[U any] interface {
+	Base[U]
+	List() []U
+}
+`)
+	out, err := GenerateRewireMock(src, "Outer", "example/bar", "bar", "footest", []string{"int"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+	t.Log("Generated:\n" + result)
+
+	fset := token.NewFileSet()
+	if _, err := parser.ParseFile(fset, "", result, parser.ParseComments); err != nil {
+		t.Fatalf("generated source does not parse: %v\n%s", err, result)
+	}
+
+	mustContain := []string{
+		// The promoted Get method has U → int flowing through via
+		// Base[U] → Base[int]. The generated method returns int.
+		`func (m *_rewire_mock_bar_Outer_int) Get(id int) (_r0 int)`,
+		`func (m *_rewire_mock_bar_Outer_int) List() (_r0 []int)`,
+		// Receiver type in the mockFnType uses the ROOT Outer[int], not Base[int].
+		`_rewire_raw.(func(bar.Outer[int], int) int)`,
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(result, s) {
+			t.Errorf("expected output to contain %q\n---\n%s", s, result)
+		}
+	}
+}
+
+// Nil resolver with a cross-package embed → clear error referencing
+// the embed.
+func TestGenerateRewireMock_EmbedNilResolverError(t *testing.T) {
+	src := []byte(`package bar
+
+import "io"
+
+type WithEmbed interface {
+	io.Reader
+}
+`)
+	_, err := GenerateRewireMock(src, "WithEmbed", "example/bar", "bar", "footest", nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected error when resolver is nil and embed crosses packages")
+	}
+	if !strings.Contains(err.Error(), "io.Reader") && !strings.Contains(err.Error(), "InterfaceResolver") {
+		t.Errorf("expected error mentioning io.Reader or InterfaceResolver, got: %v", err)
 	}
 }
 
@@ -116,7 +255,7 @@ type Store[V any] interface {
 	Set(key string, v V)
 }
 `)
-	_, err := GenerateRewireMock(src, "Store", "example/bar", "bar", "footest", nil, nil)
+	_, err := GenerateRewireMock(src, "Store", "example/bar", "bar", "footest", nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected arity error")
 	}
@@ -133,7 +272,7 @@ type Greeter interface {
 	Greet(name string) string
 }
 `)
-	_, err := GenerateRewireMock(src, "Greeter", "example/bar", "bar", "footest", []string{"int"}, nil)
+	_, err := GenerateRewireMock(src, "Greeter", "example/bar", "bar", "footest", []string{"int"}, nil, nil)
 	if err == nil {
 		t.Fatal("expected arity error for non-generic interface with type args")
 	}
@@ -154,7 +293,7 @@ type Container[T any] interface {
 	Len() int
 }
 `)
-	out, err := GenerateRewireMock(src, "Container", "github.com/example/bar", "bar", "footest", []string{"int"}, nil)
+	out, err := GenerateRewireMock(src, "Container", "github.com/example/bar", "bar", "footest", []string{"int"}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,6 +347,7 @@ type Holder[T any] interface {
 		"Holder", "github.com/example/bar", "bar", "footest",
 		[]string{"context.Context"},
 		map[string]string{"context": "context"},
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -237,6 +377,7 @@ type Holder[T any] interface {
 		"Holder", "github.com/example/bar", "bar", "footest",
 		[]string{"time.Duration"},
 		map[string]string{"time": "time"},
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -263,7 +404,7 @@ type Cache[K comparable, V any] interface {
 	Get(k K) (V, bool)
 }
 `)
-	out, err := GenerateRewireMock(src, "Cache", "github.com/example/bar", "bar", "footest", []string{"string", "int"}, nil)
+	out, err := GenerateRewireMock(src, "Cache", "github.com/example/bar", "bar", "footest", []string{"string", "int"}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -20,7 +20,7 @@ Mock struct methods via Go method expressions (`(*Type).Method` or `Type.Method`
 
 Synthesize a concrete backing struct for an interface at compile time, triggered purely by a reference in a test. No `go:generate`, no committed `mock_*_test.go` files, no separate CLI invocation. Stubbing uses the same `rewire.InstanceMethod` verb as per-instance concrete method mocks — one API vocabulary across both. See [Interface Mocks](interface-mocks.md).
 
-Handles non-generic interfaces *and* generic interfaces with arbitrary type-argument shapes (builtins, slices, maps, pointers, external-package types, nested generics). Each instantiation produces its own backing struct keyed on `reflect.TypeFor[I]()`. Embedded interfaces and types from the interface's own declaring package are still gaps (see "Remaining gaps" below).
+Handles non-generic interfaces, generic interfaces with arbitrary type-argument shapes (builtins, slices, maps, pointers, external-package types, nested generics), and embedded interfaces (same-file, same-package, and cross-package — including generic embeds where the outer interface's type parameter flows into the embed). Each instantiation produces its own backing struct keyed on `reflect.TypeFor[I]()`. Types from the interface's own declaring package are still a gap (see "Remaining gaps" below).
 
 ### Expectation DSL
 
@@ -46,9 +46,8 @@ Rewire's rewrite transformation is small enough that Go's inliner inlines the wr
 
 ### Remaining gaps in `rewire.NewMock[T]`
 
-Phase 2a (generic interfaces) is shipped — see the section above. Two gaps remain:
+Phase 2a (generic interfaces) and Phase 2c (embedded interfaces) are shipped — see the section above. Two gaps remain:
 
-- **Embedded interfaces** (Phase 2c) — `io.ReadCloser` (`io.Reader` + `io.Closer`) and similar composed interfaces. Requires transitive method-set resolution across packages.
 - **Types from the interface's own declaring package** (Phase 2b) — an interface that returns `*Greeter` where `Greeter` lives in the same package needs the generator to qualify bare identifiers with the declaring package alias.
 - **Module-aware resolution** — respect `replace` directives, workspace files, and vendor directories when locating an interface's source.
 

@@ -182,7 +182,7 @@ Design choices:
 - **Same dispatch as per-instance method mocks.** Each generated method body consults a per-method `_ByInstance sync.Map` and falls back to zero-value returns. The sync.Map is populated by `rewire.InstanceMethod(t, mock, I.Method, replacement)` — one stubbing verb across concrete per-instance mocks and interface-method mocks.
 - **Factory registry.** The generated file's `init()` registers a `func() any` factory keyed on the interface's fully-qualified name. `rewire.NewMock[I](t)` looks up the factory by `reflect.TypeFor[I]()`-derived key, calls it, and type-asserts back to `I`. Non-reflective at the hot path — factory lookup is O(1), struct construction is a plain `new`.
 - **Non-zero-size backing struct.** Go's spec explicitly permits pointers to distinct zero-size variables to compare equal, which would break per-instance dispatch since the sync.Map keys on receiver pointer identity. The generator emits `struct{ _ [1]byte }` to force distinct allocations to get distinct addresses. Load-bearing, documented in the generator source.
-- **Current scope.** Non-generic interfaces, generic interfaces with arbitrary type-argument shapes (builtins, slices, maps, pointers, external-package types, nested generic instantiations), and methods using imported types in their signatures. Each generic instantiation produces its own backing struct keyed on `reflect.TypeFor[I]()`, and the scanner forwards per-instantiation import resolution from the test file so type args from packages the interface's declaring file doesn't import (e.g. `Container[time.Duration]`) work correctly. Embedded interfaces and types from the interface's own declaring package are still rejected with clear errors (Phase 2b/2c — see `plans/TODO_toolexec_interface_mocks_phase2.md`).
+- **Current scope.** Non-generic interfaces, generic interfaces with arbitrary type-argument shapes (builtins, slices, maps, pointers, external-package types, nested generic instantiations), embedded interfaces (same-file, same-package, cross-package — including generic embeds where the outer interface's type parameter flows into the embed), and methods using imported types in their signatures. Each generic instantiation produces its own backing struct keyed on `reflect.TypeFor[I]()`, and the scanner forwards per-instantiation import resolution from the test file so type args from packages the interface's declaring file doesn't import (e.g. `Container[time.Duration]`) work correctly. Embedded-interface walking uses an `InterfaceResolver` callback the toolexec wrapper injects; mockgen itself does no filesystem I/O. Types from the interface's own declaring package referenced as bare identifiers are still rejected with clear errors (Phase 2b — see `plans/TODO_toolexec_interface_mocks_phase2.md`).
 
 A standalone `rewire mock` CLI subcommand that wrote committed mock files used to coexist with the toolexec path. It was removed once the toolexec path covered the common ground; the toolexec route is now the sole interface-mocking entry point in rewire.
 
@@ -202,10 +202,9 @@ Generate an overlay JSON file mapping source files to rewritten versions. `gopls
 
 ### Interface mock Phase 2 (remaining work)
 
-Generic interfaces (Phase 2a) shipped — see the `Current scope` note above. Two milestones remain:
+Generic interfaces (Phase 2a) and embedded interfaces (Phase 2c) are shipped — see the `Current scope` note above. Two milestones remain:
 
 - **Same-package type qualification** (Phase 2b) — so an interface in `bar/` can safely expose `*bar.Greeter` in a method signature. Requires the generator to qualify bare identifiers that name types declared in the interface's own package.
-- **Embedded interfaces** (Phase 2c) — `io.ReadCloser`-style composition. Requires transitive method-set resolution across package boundaries.
 - **Module-aware package resolution** — respect `replace` directives, workspace files, and vendor directories via `go list` rather than the current `go/build.Import` approach.
 
 ### Generic interfaces (shipped)
