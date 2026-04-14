@@ -408,6 +408,7 @@ func runScale(args []string) {
 	sizesFlag := fs.String("sizes", "10,25,50,100", "comma-separated module sizes")
 	iters := fs.Int("iters", 3, "timed iterations per size")
 	jsonOut := fs.Bool("json", false, "emit JSON instead of the human-readable summary")
+	incremental := fs.String("incremental", "", "write each completed row to this file as JSON Lines; safe to kill mid-run")
 	_ = fs.Parse(args)
 
 	sizes, err := parseSizes(*sizesFlag)
@@ -417,6 +418,17 @@ func runScale(args []string) {
 	rewireRoot, err := os.Getwd()
 	if err != nil {
 		die("getwd", err)
+	}
+
+	// Open the incremental output file (JSON Lines) if requested, so
+	// a kill mid-run still leaves whatever rows have completed.
+	var incrFile *os.File
+	if *incremental != "" {
+		incrFile, err = os.OpenFile(*incremental, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+		if err != nil {
+			die("open -incremental", err)
+		}
+		defer func() { _ = incrFile.Close() }()
 	}
 
 	// One shared tmp dir for all generated modules. We keep them
@@ -432,33 +444,61 @@ func runScale(args []string) {
 		die("install rewire", err)
 	}
 
+	// Print the header ONCE at the start so downstream piping
+	// (including `| tee`, `| tail`, etc.) sees a live stream of
+	// per-size rows as they complete — no tail buffering until EOF.
+	out := os.Stdout
+	pln := func(format string, args ...any) {
+		_, _ = fmt.Fprintf(out, format, args...)
+	}
+	pln("==> Scaling sweep: sizes=%v iters=%d\n", sizes, *iters)
+	pln("%8s  %20s  %20s  %8s  %10s\n",
+		"N pkgs", "baseline (s)", "rewire (s)", "ratio", "overhead")
+	pln("%8s  %20s  %20s  %8s  %10s\n",
+		"------", "------------", "----------", "-----", "--------")
+
 	var all []ScaleRow
 	for _, n := range sizes {
-		fmt.Fprintf(os.Stderr, "\n==> N=%d: generating synthetic module\n", n)
+		_, _ = fmt.Fprintf(os.Stderr, "\n==> N=%d: generating synthetic module\n", n)
 		modDir := filepath.Join(workDir, fmt.Sprintf("bench-%d", n))
 		if err := generateModule(modDir, n, rewireRoot); err != nil {
 			die(fmt.Sprintf("gen N=%d", n), err)
 		}
 
-		fmt.Fprintf(os.Stderr, "==> N=%d: benchmarking × %d iters\n", n, *iters)
+		_, _ = fmt.Fprintf(os.Stderr, "==> N=%d: benchmarking × %d iters\n", n, *iters)
 		res, err := runSingleBenchmark(modDir, "./...", *iters, false, rewireRoot)
 		if err != nil {
 			die(fmt.Sprintf("bench N=%d", n), err)
 		}
-		all = append(all, ScaleRow{N: n, Result: *res})
-		fmt.Fprintf(os.Stderr, "    baseline %.3fs±%.3f  rewire %.3fs±%.3f  ratio %.2fx (%+.1f%%)\n",
+		row := ScaleRow{N: n, Result: *res}
+		all = append(all, row)
+
+		// Live summary row to stdout so the sweep is visibly alive
+		// even under pipe buffering.
+		pln("%8d  %8.3f ± %-8.3f  %8.3f ± %-8.3f  %7.2fx  %9.1f%%\n",
+			n,
 			res.Baseline.Mean, res.Baseline.Stddev,
 			res.Rewire.Mean, res.Rewire.Stddev,
 			res.Ratio(), res.OverheadPct())
+
+		// Persist the completed row immediately so a kill mid-run
+		// leaves the partial data on disk.
+		if incrFile != nil {
+			enc := json.NewEncoder(incrFile)
+			if err := enc.Encode(row); err != nil {
+				die("write incremental", err)
+			}
+			_ = incrFile.Sync()
+		}
 	}
 
 	if *jsonOut {
-		if err := json.NewEncoder(os.Stdout).Encode(all); err != nil {
+		if err := json.NewEncoder(out).Encode(all); err != nil {
 			die("encode", err)
 		}
 		return
 	}
-	printScaleTable(os.Stdout, all)
+	printScaleTable(out, all)
 }
 
 // ScaleRow is one N sample in a scaling sweep.
