@@ -211,7 +211,7 @@ Generic interfaces (Phase 2a), same-package bare type qualification (Phase 2b), 
 
 ### API consolidation and rename pass
 
-Once the full feature scope has settled, a coherent cleanup of the public API surface — collapsing `Func` / `InstanceMethod` / `Restore`'s overloaded semantics into a more uniform verb set, rethinking whether the `expect` package splits into `For` / `ForInstance` or unifies under an options pattern. Deliberately deferred to avoid piecemeal renames. See `plans/TODO_rename_refactor_once_done.md`.
+Once the full feature scope has settled, a coherent cleanup of the public API surface — collapsing `Func` / `InstanceMethod` / `Restore`'s overloaded semantics into a more uniform verb set, rethinking whether the `expect` package splits into `For` / `ForInstance` or unifies under an options pattern. Deliberately deferred to avoid piecemeal renames. See `plans/TODO_next_session.md`.
 
 ### Parallel test safety
 

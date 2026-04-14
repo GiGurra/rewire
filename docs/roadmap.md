@@ -48,11 +48,9 @@ Rewire's rewrite transformation is small enough that Go's inliner inlines the wr
 
 Phase 2a (generic interfaces), Phase 2b (same-package bare type qualification), Phase 2c (embedded interfaces), Phase 2d (module-aware package resolution), and Phase 2e (dot-import support) are all shipped — see the section above. All actionable items in the `rewire.NewMock[T]` roadmap are now complete.
 
-See `plans/TODO_toolexec_interface_mocks_phase2.md` for the design.
-
 ### API naming pass
 
-Once the full feature scope is stable, a coherent rename + consolidation pass to address vocabulary drift across `Func` / `InstanceMethod` / `NewMock` / `expect.For` / `expect.ForInstance`. Deliberately deferred until the library's surface area has settled — piecemeal renames are worse than one coherent sweep. See `plans/TODO_rename_refactor_once_done.md`.
+Once the full feature scope is stable, a coherent rename + consolidation pass to address vocabulary drift across `Func` / `InstanceMethod` / `NewMock` / `expect.For` / `expect.ForInstance`. Deliberately deferred until the library's surface area has settled — piecemeal renames are worse than one coherent sweep. See `plans/TODO_next_session.md`.
 
 ## Gaps we're not actively tackling
 
@@ -61,7 +59,7 @@ These are more fundamental than the items above. We list them so expectations ar
 - **Parallel test safety for the same target.** `t.Parallel()` tests that mock the *same* function with different replacements will race on the shared `Mock_` variable. Parallel tests mocking *different* targets are fine.
 - **Compiler intrinsics.** Functions like `math.Abs`, `math.Sqrt`, `math.Floor` are replaced by CPU instructions at the call site, bypassing any wrapper. Rewire detects these and fails with a clear error. Non-intrinsic alternatives work fine.
 - **Assembly / bodyless functions.** No Go source to rewrite. Detected and rejected at compile time.
-- **Unexported functions across packages.** `bar.greet` (lowercase) can only be referenced from inside package `bar`, so the `rewire.Func` call has to live in `bar`'s own `_test.go` file. See `plans/TODO_mock_unexported_cross_package.md` for a possible approach if this becomes a real pain point.
+- **Unexported functions across packages.** `bar.greet` (lowercase) can only be referenced from inside package `bar`, so the `rewire.Func` call has to live in `bar`'s own `_test.go` file. Not actively tackled.
 
 ## Non-goals
 
