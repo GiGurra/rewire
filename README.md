@@ -9,7 +9,7 @@
 Mock anything — No `go generate` code generation, no runtime patching.
 
 ```go
-// Mock a stdlib function:
+// Mock any function:
 rewire.Func(t, os.Getwd, func() (string, error) { return "/mocked", nil })
 
 // Mock a struct method, globally:
