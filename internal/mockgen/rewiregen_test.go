@@ -38,7 +38,7 @@ type GreeterIface interface {
 		`Mock__rewire_mock_bar_GreeterIface_Greet_ByInstance.Load(m)`,
 		`_rewire_raw.(func(bar.GreeterIface, string) string)`,
 		`_rewire_fn(m, name)`,
-		`rewire.RegisterMockFactory("github.com/example/bar.GreeterIface"`,
+		`rewire.RegisterMockFactory[bar.GreeterIface](func() any { return &_rewire_mock_bar_GreeterIface{} })`,
 		`rewire.RegisterByInstance("github.com/example/bar.GreeterIface.Greet"`,
 	}
 	for _, s := range mustContain {

@@ -233,9 +233,16 @@ func GenerateRewireMock(src []byte, interfaceName, interfacePkgPath, interfacePk
 	}
 
 	// init(): register the factory, then each per-method dispatch table.
+	//
+	// The factory registration uses the generic form — the type
+	// parameter flows the interface type through to reflect at runtime,
+	// which derives the registry key from PkgPath()+"."+Name(). Same
+	// derivation NewMock[I] uses at lookup time, so the keys can never
+	// drift. The generated file doesn't need to import reflect.
 	fullIfaceName := interfacePkgPath + "." + interfaceName
 	b.WriteString("func init() {\n")
-	fmt.Fprintf(&b, "\trewire.RegisterMockFactory(%q, func() any { return &%s{} })\n", fullIfaceName, structName)
+	fmt.Fprintf(&b, "\trewire.RegisterMockFactory[%s.%s](func() any { return &%s{} })\n",
+		interfacePkgAlias, interfaceName, structName)
 	for _, m := range methods {
 		fmt.Fprintf(&b, "\trewire.RegisterByInstance(%q, &Mock_%s_%s_ByInstance)\n",
 			fullIfaceName+"."+m.name, structName, m.name)

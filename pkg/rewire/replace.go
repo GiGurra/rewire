@@ -46,17 +46,31 @@ func RegisterByInstance(funcName string, byInstanceMap *sync.Map) {
 	byInstanceRegistry.Store(funcName, byInstanceMap)
 }
 
-// RegisterMockFactory maps a fully-qualified interface name to a
-// factory that produces a fresh mock instance satisfying it. Called by
-// generated init() code emitted during toolexec compilation for each
-// interface referenced via rewire.NewMock[I]. Users should not call it
-// directly.
+// RegisterMockFactory registers a factory that produces a fresh mock
+// instance satisfying the interface type I. Called by generated init()
+// code emitted during toolexec compilation for each interface
+// referenced via rewire.NewMock[I]. Users should not call it directly.
 //
-// The factory returns any-typed so the generated file doesn't need to
-// import pkg/rewire with generics in scope; NewMock does the type
-// assertion back to I at the call site.
-func RegisterMockFactory(interfaceName string, factory func() any) {
-	mockFactoryRegistry.Store(interfaceName, factory)
+// The registry key is derived from I via reflect.TypeOf — the same
+// computation NewMock[I] uses at lookup time. Passing the type as a
+// type parameter (rather than a pre-formatted string) means the
+// generated file doesn't have to format the key, doesn't have to
+// import reflect, and can never drift out of sync with reflect's
+// canonical name format for generic interface instantiations.
+//
+// The factory returns any-typed so the generated file doesn't have
+// generics in scope; NewMock does the type assertion back to I at the
+// call site.
+func RegisterMockFactory[I any](factory func() any) {
+	typ := reflect.TypeFor[I]()
+	if typ == nil || typ.Kind() != reflect.Interface || typ.PkgPath() == "" || typ.Name() == "" {
+		// The toolexec codegen only emits RegisterMockFactory for
+		// named, exported interfaces — anything else is a bug in
+		// rewire itself, not user error. Fail loudly so we catch it.
+		panic(fmt.Sprintf("rewire.RegisterMockFactory: invalid interface type %v (must be a named, exported interface)", typ))
+	}
+	key := typ.PkgPath() + "." + typ.Name()
+	mockFactoryRegistry.Store(key, factory)
 }
 
 // NewMock returns a fresh mock instance of interface type I. The mock's
@@ -83,12 +97,12 @@ func RegisterMockFactory(interfaceName string, factory func() any) {
 // with a targeted error.
 //
 // Works only for exported interface types. I must be resolvable by
-// reflect.TypeOf and have a non-empty PkgPath.
+// reflect.TypeFor and have a non-empty PkgPath.
 func NewMock[I any](t *testing.T) I {
 	t.Helper()
 
 	var zero I
-	typ := reflect.TypeOf(&zero).Elem()
+	typ := reflect.TypeFor[I]()
 	if typ == nil {
 		t.Fatal("rewire.NewMock: type parameter I has no runtime type")
 		return zero
