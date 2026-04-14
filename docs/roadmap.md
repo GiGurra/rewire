@@ -20,7 +20,7 @@ Mock struct methods via Go method expressions (`(*Type).Method` or `Type.Method`
 
 Synthesize a concrete backing struct for an interface at compile time, triggered purely by a reference in a test. No `go:generate`, no committed `mock_*_test.go` files, no separate CLI invocation. Stubbing uses the same `rewire.InstanceMethod` verb as per-instance concrete method mocks — one API vocabulary across both. See [Interface Mocks](interface-mocks.md).
 
-Handles non-generic interfaces, generic interfaces with arbitrary type-argument shapes (builtins, slices, maps, pointers, external-package types, nested generics), and embedded interfaces (same-file, same-package, and cross-package — including generic embeds where the outer interface's type parameter flows into the embed). Each instantiation produces its own backing struct keyed on `reflect.TypeFor[I]()`. Types from the interface's own declaring package are still a gap (see "Remaining gaps" below).
+Handles non-generic interfaces, generic interfaces with arbitrary type-argument shapes (builtins, slices, maps, pointers, external-package types, nested generics), embedded interfaces (same-file, same-package, and cross-package — including generic embeds where the outer interface's type parameter flows into the embed), and methods referencing same-package types as bare identifiers (auto-qualified with the declaring package alias at generation time). Each instantiation produces its own backing struct keyed on `reflect.TypeFor[I]()`.
 
 ### Expectation DSL
 
@@ -46,10 +46,9 @@ Rewire's rewrite transformation is small enough that Go's inliner inlines the wr
 
 ### Remaining gaps in `rewire.NewMock[T]`
 
-Phase 2a (generic interfaces) and Phase 2c (embedded interfaces) are shipped — see the section above. Two gaps remain:
+Phase 2a (generic interfaces), Phase 2b (same-package bare type qualification), and Phase 2c (embedded interfaces) are all shipped — see the section above. The remaining gap is:
 
-- **Types from the interface's own declaring package** (Phase 2b) — an interface that returns `*Greeter` where `Greeter` lives in the same package needs the generator to qualify bare identifiers with the declaring package alias.
-- **Module-aware resolution** — respect `replace` directives, workspace files, and vendor directories when locating an interface's source.
+- **Module-aware resolution** — respect `replace` directives, workspace files, and vendor directories when locating an interface's source (currently uses `go/build.Import`, which handles standard `GOPATH`/module-mode resolution but not the less common cases).
 
 See `plans/TODO_toolexec_interface_mocks_phase2.md` for the design.
 

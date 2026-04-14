@@ -99,6 +99,7 @@ Supported today:
     - Nested generic instantiations (`Container[Container[int]]`)
     - Types from the test package itself (`Container[*User]`)
 - **Methods using imported types** — `context.Context`, `io.Reader`, etc.
+- **Methods referencing same-package types as bare identifiers** — an interface in `bar/` can return `*Greeter` (without qualifying it as `*bar.Greeter`), and the generator automatically qualifies it when synthesizing the backing struct into the test package.
 - **Variadic parameters, multi-return, unnamed parameters**
 - **Multiple mocks of the same interface** — scoped independently via per-instance dispatch
 - **Multiple instantiations of the same generic interface** — `Container[int]` and `Container[string]` produce distinct backing structs and don't collide
@@ -114,6 +115,7 @@ n  := rewire.NewMock[bar.Container[bar.Container[int]]](t)  // nested generic
 e  := rewire.NewMock[bar.Container[time.Duration]](t)  // external package type arg
 rc := rewire.NewMock[bar.ReadCloser](t)                // embeds io.Reader + same-pkg Named
 lr := rewire.NewMock[bar.ListRepo[int]](t)             // generic embed: ListRepo[U] embeds Base[U]
+gf := rewire.NewMock[bar.GreeterFactory](t)            // bare same-pkg *Greeter auto-qualified
 ```
 
 Stubbing a promoted method uses the OUTER interface as the receiver in the method expression — that's what Go's runtime reports for method expressions on types with embeds:
@@ -125,10 +127,6 @@ rewire.InstanceMethod(t, rc, bar.ReadCloser.Read, func(r bar.ReadCloser, p []byt
     return copy(p, "hi"), nil
 })
 ```
-
-Not yet supported (rejected with clear errors):
-
-- Types from the interface's own declaring package (e.g. a method returning `*Greeter` where `Greeter` is defined in the same package as `GreeterIface`)
 
 ### Trade-offs
 

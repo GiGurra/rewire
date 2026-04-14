@@ -48,6 +48,17 @@ type CacheIface[K comparable, V any] interface {
 	Get(k K) (V, bool)
 }
 
+// GreeterFactory exercises the same-package type qualification path:
+// its methods reference bar.Greeter via the BARE identifier (Greeter,
+// not bar.Greeter) because the interface itself lives in package bar.
+// The toolexec generator must qualify these bare idents with the bar
+// alias when emitting the mock into the test package.
+type GreeterFactory interface {
+	Make(prefix string) *Greeter
+	WrapAll(gs []*Greeter) []*Greeter
+	ByName() map[string]*Greeter
+}
+
 // Named is a tiny same-file embed target.
 type Named interface {
 	Name() string

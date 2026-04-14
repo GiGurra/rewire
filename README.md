@@ -160,7 +160,7 @@ No `go:generate` step. No `mock_*_test.go` files committed to the repo. The tool
 - Unstubbed methods return zero values.
 - `rewire.Restore(t, mock)` clears every stub on a mock.
 
-**Current scope:** non-generic *and* generic interfaces, plus embedded interfaces. Generic interfaces support arbitrary type arguments — builtins, slices, maps, pointers, types from external packages, even nested generic instantiations like `Container[Container[int]]` — and each instantiation produces its own backing struct keyed by reflect's instantiation-aware type name. Embedded interfaces work the same way whether the embed lives in the same file, another file in the same package, or another package (e.g. `io.Reader`); generic embeds propagate the outer type parameter into the embed. Types from the interface's own declaring package referenced as bare identifiers are still rejected with clear errors.
+**Current scope:** non-generic and generic interfaces (any type-argument shape, including nested generics and external-package type args), embedded interfaces (same-file, same-package, cross-package, and generic embeds with type-parameter flow), and methods using bare same-package identifiers like `*Greeter` — the generator auto-qualifies them when synthesizing the backing struct into the test package. Each generic instantiation produces its own backing struct keyed by reflect's instantiation-aware type name.
 
 See [Interface Mocks](docs/interface-mocks.md) for the full feature set.
 
@@ -304,7 +304,8 @@ Simpler, but `go build` now also runs through the rewire toolexec. The overhead 
 - **Compiler intrinsics** — `math.Abs`, `math.Sqrt`, `math.Floor` and friends are replaced by CPU instructions at the call site, bypassing any wrapper. Rewire detects these and fails with a clear error. Non-intrinsic alternatives (`math.Pow`, for example) work fine.
 - **Bodyless functions** — functions implemented in assembly have no Go source to rewrite. Detected and rejected at compile time.
 - **Parallel mocks on the same target** — two `t.Parallel()` tests that mock the same function with different replacements will race on the package-level mock variable. Rewire is single-test-at-a-time per target.
-- **Interface mocks** — generic interfaces are supported (any type-argument shape, including nested generics and external-package type args), as are embedded interfaces (same-file, same-package, cross-package, and generic embeds with type-parameter flow). Types from the interface's own declaring package referenced as bare identifiers are still rejected with clear errors.
+- **Interface mocks with dot imports** — an interface whose declaring file uses `import . "pkg"` can confuse the bare-type qualifier, since dotted names look like same-package references. Dot imports are rare and discouraged in practice.
+- **Module-aware package resolution** — `go/build.Import` doesn't respect `replace` directives, workspaces, or vendor directories when locating an interface's source.
 
 </details>
 

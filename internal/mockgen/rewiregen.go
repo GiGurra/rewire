@@ -40,6 +40,19 @@ type flatMethod struct {
 	funcType    *ast.FuncType     // post-substitution
 	fset        *token.FileSet    // fset owning funcType's positions
 	fileImports map[string]string // local name → import path from the originating file
+
+	// originPkgPath is the import path of the package that declared
+	// this method. Used to import the origin package in the generated
+	// file when the method's signature references types from its own
+	// package as bare identifiers.
+	originPkgPath string
+	// originPkgAlias is the alias to use when qualifying bare
+	// same-package type references in this method's signature. For
+	// methods originating in the root interface's package this is the
+	// caller-supplied interfacePkgAlias; for methods from embedded
+	// interfaces in other packages it defaults to the origin package's
+	// last-segment name.
+	originPkgAlias string
 }
 
 // GenerateRewireMock produces a Go source file for the test package
@@ -124,7 +137,7 @@ func GenerateRewireMock(
 	flat, err := collectFlatMethods(
 		iface, ifaceTypeParams, rootTypeArgExprs,
 		fset, file,
-		interfacePkgPath,
+		interfacePkgPath, interfacePkgAlias,
 		resolver, visited,
 	)
 	if err != nil {
@@ -160,9 +173,19 @@ func GenerateRewireMock(
 		fileImports  map[string]string
 	}
 
+	// originPkgImports collects (originPkgPath → originPkgAlias) for
+	// packages whose aliases actually appear in a method signature —
+	// i.e. where qualifyBareTypes rewrote at least one bare Ident to
+	// `alias.Ident`. Populated in the loop below and used to emit
+	// exactly the right set of origin imports.
+	originPkgImports := map[string]string{}
+
 	var methods []method
 
 	for _, fm := range flat {
+		// flatMethod.funcType is already qualified + substituted by
+		// collectFlatMethods. No further transformation needed here —
+		// just print it.
 		isVariadic := isVariadicFunc(fm.funcType)
 		params := ensureParamNames(fm.funcType.Params)
 
@@ -176,12 +199,19 @@ func GenerateRewireMock(
 			namedResultsSrc = addResultNames(fm.fset, resultsSrc)
 		}
 
-		// Track packages referenced in the (post-substitution) method
-		// signature. These come from the method's originating file —
-		// for own methods that's the root file, for promoted methods
-		// that's the embed's file.
+		// Track packages referenced in the final method signature.
 		pkgRefs := map[string]bool{}
 		collectPkgRefs(fm.funcType, pkgRefs)
+
+		// Record the origin package for import emission, but only if
+		// qualifyBareTypes actually rewrote bare idents to reference
+		// the origin alias. Without this check we'd emit unused
+		// imports for embed methods with signatures that don't touch
+		// any same-package types (e.g. io.Reader.Read → only builtins,
+		// so we don't need to import "io" in the generated file).
+		if fm.originPkgPath != "" && fm.originPkgAlias != "" && pkgRefs[fm.originPkgAlias] {
+			originPkgImports[fm.originPkgPath] = fm.originPkgAlias
+		}
 
 		// The replacement function type seen from the test author's
 		// perspective: receiver is the interface type (with alias and
@@ -266,6 +296,15 @@ func GenerateRewireMock(
 	addImport("sync", "")
 	addImport("github.com/GiGurra/rewire/pkg/rewire", "")
 	addImport(interfacePkgPath, interfacePkgAlias)
+
+	// Emit an import for every origin package we saw during method
+	// flattening — qualifyBareTypes rewrote bare same-package type refs
+	// to `alias.Ident` form, so the alias must be in scope. Root
+	// methods share interfacePkgPath / interfacePkgAlias (already
+	// added); embed methods from other packages bring their own.
+	for path, alias := range originPkgImports {
+		addImport(path, alias)
+	}
 
 	// Resolve imports referenced by each method's signature. Per-method
 	// resolution order:
@@ -392,6 +431,11 @@ func GenerateRewireMock(
 //     printing and for this file's imports.
 //   - pkgPath is iface's declaring package import path; used for
 //     visited-set keys and for resolving same-package embeds.
+//   - pkgAlias is the local alias used to qualify bare same-package
+//     type references in methods originating at this level. At the
+//     root it's the caller-supplied interfacePkgAlias; for recursive
+//     cross-package embed calls it's the embed package's default
+//     alias (last path segment).
 //   - resolver is used to fetch source for embeds that aren't declared
 //     in `file`. May be nil; cross-file embeds error clearly when nil.
 //   - visited guards against cycles (Go rejects embed cycles, but
@@ -403,24 +447,31 @@ func collectFlatMethods(
 	fset *token.FileSet,
 	file *ast.File,
 	pkgPath string,
+	pkgAlias string,
 	resolver InterfaceResolver,
 	visited map[string]bool,
 ) ([]flatMethod, error) {
 	// Build the type-parameter substitution for this level: T → <expr>,
 	// K → <expr>, etc. For non-generic interfaces the subst is empty
-	// and substituteFuncType is a no-op.
+	// and substituteFuncType is a no-op. We also build a typeParamNames
+	// set used as the skip set for qualification — we must NOT qualify
+	// type params with the pkg alias (they're about to be substituted).
 	subst := map[string]ast.Expr{}
-	if typeParams != nil && len(typeArgs) > 0 {
+	typeParamNames := map[string]bool{}
+	if typeParams != nil {
 		idx := 0
 		for _, field := range typeParams.List {
 			for _, name := range field.Names {
-				if idx >= len(typeArgs) {
-					return nil, fmt.Errorf("type-argument arity mismatch: interface declares %d type parameters but received %d arguments",
-						typeParams.NumFields(), len(typeArgs))
+				typeParamNames[name.Name] = true
+				if idx < len(typeArgs) {
+					subst[name.Name] = typeArgs[idx]
 				}
-				subst[name.Name] = typeArgs[idx]
 				idx++
 			}
+		}
+		if len(typeArgs) > 0 && idx != len(typeArgs) {
+			return nil, fmt.Errorf("type-argument arity mismatch: interface declares %d type parameters but received %d arguments",
+				idx, len(typeArgs))
 		}
 	}
 
@@ -435,11 +486,19 @@ func collectFlatMethods(
 			if !ok {
 				return nil, fmt.Errorf("unexpected non-function interface field %q", field.Names[0].Name)
 			}
+			// Qualify bare same-pkg type refs FIRST (skipping this
+			// level's type params), THEN substitute. Substituted-in
+			// exprs come from the parent's scope and are already
+			// qualified from the parent's perspective.
+			qualified := qualifyFuncType(funcType, pkgAlias, typeParamNames)
+			substituted := substituteFuncType(qualified, subst)
 			out = append(out, flatMethod{
-				name:        field.Names[0].Name,
-				funcType:    substituteFuncType(funcType, subst),
-				fset:        fset,
-				fileImports: fileImports,
+				name:           field.Names[0].Name,
+				funcType:       substituted,
+				fset:           fset,
+				fileImports:    fileImports,
+				originPkgPath:  pkgPath,
+				originPkgAlias: pkgAlias,
 			})
 			continue
 		}
@@ -475,12 +534,19 @@ func collectFlatMethods(
 			continue
 		}
 
-		// Apply the current level's substitution to the embed's type
-		// arguments before recursing. For Outer[U] embedding Base[U],
-		// with U → int, Base gets called with type args [int].
+		// Qualify the embed's type args against THIS level's pkg
+		// alias (skipping this level's type params), then apply this
+		// level's substitution, before recursing. That way any
+		// same-pkg bare idents in the embed's type-arg list (e.g.
+		// `pkgA.Inner[*Widget]` where Widget lives in the current
+		// package) become properly qualified before they enter the
+		// child's scope. The child level qualifies its OWN method
+		// signatures with its own alias; substituted-in exprs stay
+		// as-is because qualifyBareTypes leaves SelectorExpr alone.
 		substitutedEmbedArgs := make([]ast.Expr, len(embed.typeArgExprs))
 		for i, expr := range embed.typeArgExprs {
-			substitutedEmbedArgs[i] = substTypeExpr(expr, subst)
+			q := qualifyBareTypes(expr, pkgAlias, typeParamNames)
+			substitutedEmbedArgs[i] = substTypeExpr(q, subst)
 		}
 
 		// Locate the embed's AST: either already in our file (same
@@ -530,10 +596,21 @@ func collectFlatMethods(
 		// depth is cheap).
 		visited[visitKey] = true
 
+		// The recursive call's pkgAlias is used to qualify bare
+		// same-package types in the embed's method signatures. For
+		// same-package embeds we reuse the current level's alias; for
+		// cross-package embeds we pick the default last-segment alias
+		// of the embed's package.
+		embedPkgAlias := pkgAlias
+		if embedPkgPath != pkgPath {
+			embedPkgAlias = defaultPkgAlias(embedPkgPath)
+		}
+
 		nested, err := collectFlatMethods(
 			embedIface, embedTP, substitutedEmbedArgs,
 			embedFset, embedFile,
-			embedPkgPath, resolver, visited,
+			embedPkgPath, embedPkgAlias,
+			resolver, visited,
 		)
 		if err != nil {
 			return nil, err
@@ -634,6 +711,164 @@ func parseEmbedRef(expr ast.Expr) (embedRef, error) {
 		return base, nil
 	}
 	return embedRef{}, fmt.Errorf("unsupported embedded-interface form: %T", expr)
+}
+
+// predeclaredTypes is the set of identifiers Go treats as built-in
+// types in expression positions. qualifyBareTypes leaves these alone;
+// anything else in an Ident position is assumed to be a same-package
+// type that needs qualification with the declaring package's alias.
+//
+// Non-type predeclared names (nil, true, false, iota, append, len, ...)
+// are excluded because they can't appear in a type expression.
+var predeclaredTypes = map[string]bool{
+	"bool":       true,
+	"byte":       true,
+	"complex64":  true,
+	"complex128": true,
+	"error":      true,
+	"float32":    true,
+	"float64":    true,
+	"int":        true,
+	"int8":       true,
+	"int16":      true,
+	"int32":      true,
+	"int64":      true,
+	"rune":       true,
+	"string":     true,
+	"uint":       true,
+	"uint8":      true,
+	"uint16":     true,
+	"uint32":     true,
+	"uint64":     true,
+	"uintptr":    true,
+	"any":        true,
+	"comparable": true,
+}
+
+// qualifyBareTypes walks a type expression and wraps any bare
+// *ast.Ident referring to a non-predeclared, non-type-parameter type
+// with `pkgAlias.Ident`, producing a qualified selector. Idents already
+// wrapped in a selector (pkg.Type) are left alone. The result is a new
+// tree; the input is not mutated.
+//
+// This is the core of same-package type qualification: an interface
+// declared in package bar/ can write `func() *Greeter` using the bare
+// identifier because it's in its own package, but the generated mock
+// lives in the test package and must reference the same type as
+// `bar.Greeter`. qualifyBareTypes produces the `bar.` prefix.
+//
+// Must be called BEFORE type-parameter substitution. The skipIdents
+// set should contain the names of this level's type parameters so
+// they stay bare for the substitution pass to replace.
+//
+// Safety: Go's type expression grammar only admits idents that are
+// (a) predeclared type names, (b) type parameters in scope, or
+// (c) types declared in the current package. Cases (a) and (b) are
+// excluded via predeclaredTypes and skipIdents; anything left is (c).
+// Dot imports (`import . "pkg"`) are the one exception — rare and
+// discouraged, we accept imperfect handling there.
+func qualifyBareTypes(t ast.Expr, pkgAlias string, skipIdents map[string]bool) ast.Expr {
+	if pkgAlias == "" || t == nil {
+		return t
+	}
+	switch e := t.(type) {
+	case *ast.Ident:
+		if predeclaredTypes[e.Name] || e.Name == "_" || skipIdents[e.Name] {
+			return e
+		}
+		return &ast.SelectorExpr{
+			X:   ast.NewIdent(pkgAlias),
+			Sel: ast.NewIdent(e.Name),
+		}
+	case *ast.StarExpr:
+		return &ast.StarExpr{Star: e.Star, X: qualifyBareTypes(e.X, pkgAlias, skipIdents)}
+	case *ast.ArrayType:
+		return &ast.ArrayType{Lbrack: e.Lbrack, Len: e.Len, Elt: qualifyBareTypes(e.Elt, pkgAlias, skipIdents)}
+	case *ast.MapType:
+		return &ast.MapType{
+			Map:   e.Map,
+			Key:   qualifyBareTypes(e.Key, pkgAlias, skipIdents),
+			Value: qualifyBareTypes(e.Value, pkgAlias, skipIdents),
+		}
+	case *ast.ChanType:
+		return &ast.ChanType{
+			Begin: e.Begin,
+			Arrow: e.Arrow,
+			Dir:   e.Dir,
+			Value: qualifyBareTypes(e.Value, pkgAlias, skipIdents),
+		}
+	case *ast.FuncType:
+		return &ast.FuncType{
+			Func:    e.Func,
+			Params:  qualifyBareTypesInFieldList(e.Params, pkgAlias, skipIdents),
+			Results: qualifyBareTypesInFieldList(e.Results, pkgAlias, skipIdents),
+		}
+	case *ast.Ellipsis:
+		return &ast.Ellipsis{Ellipsis: e.Ellipsis, Elt: qualifyBareTypes(e.Elt, pkgAlias, skipIdents)}
+	case *ast.IndexExpr:
+		return &ast.IndexExpr{
+			X:      qualifyBareTypes(e.X, pkgAlias, skipIdents),
+			Lbrack: e.Lbrack,
+			Index:  qualifyBareTypes(e.Index, pkgAlias, skipIdents),
+			Rbrack: e.Rbrack,
+		}
+	case *ast.IndexListExpr:
+		newIndices := make([]ast.Expr, len(e.Indices))
+		for i, ix := range e.Indices {
+			newIndices[i] = qualifyBareTypes(ix, pkgAlias, skipIdents)
+		}
+		return &ast.IndexListExpr{
+			X:       qualifyBareTypes(e.X, pkgAlias, skipIdents),
+			Lbrack:  e.Lbrack,
+			Indices: newIndices,
+			Rbrack:  e.Rbrack,
+		}
+	case *ast.SelectorExpr:
+		// Already qualified — leave the selector alone. Don't recurse
+		// into e.X: in a type-expression position it must be a package
+		// identifier, which has no bare-type semantics.
+		return e
+	case *ast.InterfaceType:
+		return &ast.InterfaceType{
+			Interface:  e.Interface,
+			Methods:    qualifyBareTypesInFieldList(e.Methods, pkgAlias, skipIdents),
+			Incomplete: e.Incomplete,
+		}
+	case *ast.StructType:
+		return &ast.StructType{
+			Struct:     e.Struct,
+			Fields:     qualifyBareTypesInFieldList(e.Fields, pkgAlias, skipIdents),
+			Incomplete: e.Incomplete,
+		}
+	}
+	return t
+}
+
+func qualifyBareTypesInFieldList(fl *ast.FieldList, pkgAlias string, skipIdents map[string]bool) *ast.FieldList {
+	if fl == nil {
+		return nil
+	}
+	newList := make([]*ast.Field, len(fl.List))
+	for i, f := range fl.List {
+		newField := *f
+		newField.Type = qualifyBareTypes(f.Type, pkgAlias, skipIdents)
+		newList[i] = &newField
+	}
+	return &ast.FieldList{Opening: fl.Opening, Closing: fl.Closing, List: newList}
+}
+
+// qualifyFuncType applies qualifyBareTypes to a function type's params
+// and results, returning a new FuncType (zero allocations when
+// pkgAlias is empty).
+func qualifyFuncType(ft *ast.FuncType, pkgAlias string, skipIdents map[string]bool) *ast.FuncType {
+	if pkgAlias == "" || ft == nil {
+		return ft
+	}
+	return &ast.FuncType{
+		Func:    ft.Func,
+		Params:  qualifyBareTypesInFieldList(ft.Params, pkgAlias, skipIdents),
+		Results: qualifyBareTypesInFieldList(ft.Results, pkgAlias, skipIdents),
+	}
 }
 
 // commaPrepend returns ", s" if s is non-empty, or "" otherwise.

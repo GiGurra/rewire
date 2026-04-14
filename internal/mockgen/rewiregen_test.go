@@ -393,6 +393,151 @@ type Holder[T any] interface {
 	}
 }
 
+// Same-package type qualification: an interface whose methods use
+// bare identifiers for types declared in the same package gets those
+// identifiers wrapped with the declaring package alias. Previously
+// rejected; now the generator qualifies them on the fly.
+func TestGenerateRewireMock_SamePackageBareType(t *testing.T) {
+	src := []byte(`package bar
+
+type Widget struct {
+	Name string
+}
+
+type Service interface {
+	MakeWidget() *Widget
+	Rename(w *Widget, name string) *Widget
+	List() []Widget
+}
+`)
+	out, err := GenerateRewireMock(src, "Service", "example/bar", "bar", "footest", nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+	t.Log("Generated:\n" + result)
+
+	fset := token.NewFileSet()
+	if _, err := parser.ParseFile(fset, "", result, parser.ParseComments); err != nil {
+		t.Fatalf("generated source does not parse: %v\n%s", err, result)
+	}
+
+	mustContain := []string{
+		// Bare `*Widget` became `*bar.Widget`, including inside the
+		// slice type and as a parameter.
+		`func (m *_rewire_mock_bar_Service) MakeWidget() (_r0 *bar.Widget)`,
+		`func (m *_rewire_mock_bar_Service) Rename(w *bar.Widget, name string) (_r0 *bar.Widget)`,
+		`func (m *_rewire_mock_bar_Service) List() (_r0 []bar.Widget)`,
+		// The mockFnType signatures likewise use the qualified form.
+		`_rewire_raw.(func(bar.Service) *bar.Widget)`,
+		`_rewire_raw.(func(bar.Service, *bar.Widget, string) *bar.Widget)`,
+		`_rewire_raw.(func(bar.Service) []bar.Widget)`,
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(result, s) {
+			t.Errorf("expected output to contain %q\n---\n%s", s, result)
+		}
+	}
+}
+
+// When the same-package qualifier wants to add an import for the
+// interface's declaring package, the import must dedupe against the
+// entry already added at the top of the import block — exactly one
+// import line for the interface's own package, even though it's
+// referenced by both the interface receiver and the bare-type
+// qualification pass.
+func TestGenerateRewireMock_SamePackageQualification_ImportDedup(t *testing.T) {
+	src := []byte(`package bar
+
+type Widget struct{}
+
+type Service interface {
+	Get() *Widget
+}
+`)
+	out, err := GenerateRewireMock(src, "Service", "example/bar", "bar", "footest", nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+	// "example/bar" must appear exactly once in the import block.
+	if got := strings.Count(result, `"example/bar"`); got != 1 {
+		t.Errorf(`expected exactly one "example/bar" import, got %d\n---\n%s`, got, result)
+	}
+}
+
+// Predeclared types (int, string, error, any) must NOT be qualified —
+// they aren't package-local.
+func TestGenerateRewireMock_PredeclaredTypesNotQualified(t *testing.T) {
+	src := []byte(`package bar
+
+type Basic interface {
+	Count() int
+	Message() string
+	Done() error
+	Raw() any
+}
+`)
+	out, err := GenerateRewireMock(src, "Basic", "example/bar", "bar", "footest", nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+
+	shouldNot := []string{
+		"bar.int", "bar.string", "bar.error", "bar.any",
+	}
+	for _, s := range shouldNot {
+		if strings.Contains(result, s) {
+			t.Errorf("predeclared type was incorrectly qualified: found %q\n---\n%s", s, result)
+		}
+	}
+}
+
+// Qualification interacts correctly with generic type-param
+// substitution. Key invariant: bare same-package type refs in method
+// signatures get qualified with the interface's pkg alias, but
+// type-arg expressions that came from the test file stay as-is
+// (they're in the test pkg's scope, which IS the generated output
+// package). This test exercises both in one interface.
+func TestGenerateRewireMock_SamePackageQualificationWithGenerics(t *testing.T) {
+	src := []byte(`package bar
+
+type Gadget struct{ N int }
+
+type Holder[T any] interface {
+	Get() T                   // T stays bare (substituted later)
+	MakeGadget() *Gadget      // same-pkg bare ident — must become *bar.Gadget
+	Store(v T, g *Gadget)     // mix: T → substituted, Gadget → qualified
+}
+`)
+	// The test file would have written e.g.
+	//   rewire.NewMock[bar.Holder[*Widget]]
+	// where Widget lives in the test package, so the scanner passes
+	// "*Widget" as the type-arg string. In the generated mock
+	// (which IS the test package), *Widget stays unqualified.
+	out, err := GenerateRewireMock(src, "Holder", "example/bar", "bar", "footest", []string{"*Widget"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+	t.Log("Generated:\n" + result)
+
+	mustContain := []string{
+		// T substituted with test-pkg *Widget — stays bare.
+		`func (m *_rewire_mock_bar_Holder_ptr_Widget) Get() (_r0 *Widget)`,
+		// Same-pkg Gadget → bar.Gadget.
+		`func (m *_rewire_mock_bar_Holder_ptr_Widget) MakeGadget() (_r0 *bar.Gadget)`,
+		// Mix: test-pkg *Widget + qualified *bar.Gadget.
+		`func (m *_rewire_mock_bar_Holder_ptr_Widget) Store(v *Widget, g *bar.Gadget)`,
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(result, s) {
+			t.Errorf("expected output to contain %q\n---\n%s", s, result)
+		}
+	}
+}
+
 // Multiple type parameters, e.g. Cache[K comparable, V any]. Verifies
 // that arity > 1 substitution works and produces a struct name
 // disambiguated by both type args.
