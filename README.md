@@ -160,7 +160,7 @@ No `go:generate` step. No `mock_*_test.go` files committed to the repo. The tool
 - Unstubbed methods return zero values.
 - `rewire.Restore(t, mock)` clears every stub on a mock.
 
-**Current scope (Phase 1):** non-generic interfaces, methods using builtin or already-qualified types. Embedded interfaces, types from the interface's own declaring package, and generic interfaces are Phase 2+ items (rejected with a clear error until then).
+**Current scope:** non-generic *and* generic interfaces. Generic interfaces support arbitrary type arguments — builtins, slices, maps, pointers, types from external packages, even nested generic instantiations like `Container[Container[int]]` — and each instantiation produces its own backing struct keyed by reflect's instantiation-aware type name. Embedded interfaces and types from the interface's own declaring package are still rejected with clear errors (Phase 2b/2c).
 
 Rewire also ships an older `rewire mock` CLI that writes a committed mock file — useful when you want to review the generated code. It's still fully supported; over time the `rewire.NewMock[T]` path is intended to become rewire's canonical interface-mock API. See [Interface Mocks](docs/interface-mocks.md) for both styles.
 
@@ -304,7 +304,7 @@ Simpler, but `go build` now also runs through the rewire toolexec. The overhead 
 - **Compiler intrinsics** — `math.Abs`, `math.Sqrt`, `math.Floor` and friends are replaced by CPU instructions at the call site, bypassing any wrapper. Rewire detects these and fails with a clear error. Non-intrinsic alternatives (`math.Pow`, for example) work fine.
 - **Bodyless functions** — functions implemented in assembly have no Go source to rewrite. Detected and rejected at compile time.
 - **Parallel mocks on the same target** — two `t.Parallel()` tests that mock the same function with different replacements will race on the package-level mock variable. Rewire is single-test-at-a-time per target.
-- **Interface mocks (Phase 1)** — don't yet handle embedded interfaces, types from the interface's own declaring package, or generic interfaces. Rejected with clear errors until Phase 2 lands.
+- **Interface mocks** — generic interfaces are supported (any type-argument shape, including nested generics and external-package type args). Embedded interfaces and types from the interface's own declaring package are still rejected with clear errors.
 
 </details>
 

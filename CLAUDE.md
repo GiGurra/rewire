@@ -2,10 +2,11 @@
 
 ## Project overview
 
-Rewire is a Go test mocking tool with two complementary features:
+Rewire is a Go test mocking tool with three modes that share one toolexec pipeline:
 
-1. **Function/method mocking (toolexec)**: Uses `-toolexec` to intercept compilation and rewrite functions at compile time. Scans `_test.go` files for `rewire.Func` calls, builds a targeted list, and rewrites only those during compilation. Production source is never modified.
-2. **Interface mock generation (codegen)**: Generates lightweight mock structs for Go interfaces via `rewire mock`. Uses `go:generate` for automation.
+1. **Function/method mocking (`rewire.Func` + toolexec)**: Uses `-toolexec` to intercept compilation and rewrite functions at compile time. Scans `_test.go` files for `rewire.Func` calls, builds a targeted list, and rewrites only those during compilation. Production source is never modified.
+2. **Interface mock synthesis (`rewire.NewMock[T]` + toolexec)**: Same toolexec pipeline. Scans test files for `rewire.NewMock[I]` references, locates I's source, and synthesizes a backing struct at compile time. No `go:generate`, no committed files. Handles non-generic AND generic interfaces (Phase 2a — arbitrary type-arg shapes including external-package types and nested generics). Embedded interfaces and types from the interface's declaring package are still rejected with clear errors.
+3. **Interface mock CLI (`rewire mock` — legacy `go:generate` style)**: An older standalone CLI that writes a committed `mock_*_test.go` file. Still supported, candidate for deprecation inside rewire once the toolexec NewMock path reaches feature parity (embedded interfaces, declaring-package types).
 
 Inspired by Erlang's meck.
 
@@ -40,21 +41,25 @@ After changing rewire source: always `go install ./cmd/rewire/` before running t
 
 - `cmd/rewire/main.go` — Entry point. Detects toolexec mode (first arg is absolute path to a Go tool) vs CLI subcommand mode. Uses boa (github.com/GiGurra/boa) for CLI. Subcommands: `rewrite` (debug), `mock` (interface mock generation).
 - `pkg/rewire/replace.go` — The public test API:
-  - `Func[F any](t, original, replacement)` — recommended API. Uses `runtime.FuncForPC` to resolve function name, looks up mock var pointer in `sync.Map` registry, sets/restores via `reflect`.
+  - `Func[F any](t, original, replacement)` — replace a function or method (per-instantiation for generics).
+  - `NewMock[I any](t)` — return a fresh mock instance of interface I. Triggers compile-time backing-struct synthesis for I via toolexec.
+  - `InstanceMethod[I, F any](t, instance, original, replacement)` — per-receiver method mock. Used to stub interface methods on `NewMock` instances and to scope concrete-method mocks to one receiver.
+  - `Real[F any](t, original)` — return the pre-rewrite implementation for spy-style tests.
+  - `Restore[T any](t, target)` — overloaded: function target → clear global mock; instance target → clear all per-instance mocks on that instance.
+  - `RestoreInstanceMethod[I, F any](t, instance, original)` — clear one per-instance entry.
+  - `RegisterMockFactory[I](factory)`, `RegisterByInstance[F](funcName, &table, witness)`, `Register(funcName, mockVarPtr)`, `RegisterReal(funcName, fn)` — called by generated init() code, not by users. The two `[I]` / `[F]` forms use type parameters so reflect.TypeFor derives the registry key on both sides, avoiding any compile-time string formatting drift.
   - `Replace[F any](t, &target, replacement)` — low-level API, directly swaps a mock var by pointer.
-  - `Register(funcName, mockVarPtr)` — called by generated init() code, not by users.
 - `internal/rewriter/rewriter.go` — AST rewriter:
   - `RewriteSource` — rewrites a single named function or method. Accepts `"Func"`, `"(*Type).Method"`, or `"Type.Method"` syntax. Skips bodyless functions.
-  - `RewriteAllExported` — rewrites all eligible exported functions (used by the `rewrite` CLI subcommand).
-  - `ListExportedFunctions` — returns names of functions eligible for rewriting.
-- `internal/mockgen/mockgen.go` — Interface mock generator:
-  - `GenerateMock(src, interfaceName, outputPkg)` — parses interface from source, generates mock struct with function fields for each method. Handles imported types, variadic params, unnamed params, multiple returns. Uses named return params for zero-value defaults.
-  - `InferPackageName(src)` — extracts package name from Go source.
+  - `RewriteSourceOpts` — same plus a `ByInstance` option for emitting per-instance dispatch tables.
+  - Special-cases generic functions and methods on generic types via `rewriteGenericFunction` / `rewriteGenericMethod`.
+- `internal/mockgen/rewiregen.go` — Toolexec interface mock generator (`GenerateRewireMock`). Parses an interface's source, synthesizes a concrete backing struct, generates per-method dispatch tables, and emits a registration `init()`. Performs AST-level type-parameter substitution for generic interfaces (Phase 2a) and consults a per-instantiation type-arg import map to emit correct imports for type args from packages the interface's declaring file doesn't import.
+- `internal/mockgen/mockgen.go` — Legacy CLI mock generator (`GenerateMock`) for the `rewire mock` `go:generate` style. Same general shape as `rewiregen.go` but produces a committed file with function-field mocks. Doesn't yet support generics or embedded interfaces.
 - `internal/toolexec/toolexec.go` — Toolexec wrapper:
   - Intercepts `compile` invocations for any package with targeted functions.
-  - Rewrites only the specific functions found in `rewire.Func` calls.
-  - For test compilations: generates `_rewire_init_test.go` that registers mock var pointers.
-- `internal/toolexec/scan.go` — Pre-scans `_test.go` files for `rewire.Func` calls. Builds a map of import path -> function/method names. Handles `pkg.Func`, `pkg.Type.Method`, and `(*pkg.Type).Method` patterns. Results cached per build (keyed on parent PID).
+  - Rewrites only the specific functions found in `rewire.Func` / `rewire.InstanceMethod` calls.
+  - For test compilations: generates `_rewire_init_test.go` that registers mock var pointers AND runs `generateInterfaceMocks` to synthesize backing structs for any `rewire.NewMock[I]` references in the test sources.
+- `internal/toolexec/scan.go` — Pre-scans `_test.go` files for `rewire.{Func,Real,Restore,InstanceMethod,RestoreInstanceMethod,NewMock}` calls. Builds (a) a map of import path → function/method names, (b) per-instantiation generic type-arg combos, (c) the byInstance subset, and (d) a `mockedInterfaces` map of `importPath → ifaceName → []mockInstance{TypeArgs, TypeArgImports}`. Handles `pkg.Func`, `pkg.Type.Method`, `(*pkg.Type).Method`, `pkg.Func[T]`, and `rewire.NewMock[pkg.Iface[T, U]]` patterns. Results cached per build (keyed on parent PID).
 - `internal/toolexec/intrinsics.go` — Detects compiler intrinsic functions by parsing `$GOROOT/src/cmd/compile/internal/ssagen/intrinsics.go`. Intrinsics are replaced by CPU instructions at the call site, bypassing any wrapper.
 - `example/` — End-to-end examples:
   - `bar/bar.go` — production functions and types (`Greet`, `Greeter`)
@@ -69,8 +74,9 @@ After changing rewire source: always `go install ./cmd/rewire/` before running t
 - **Registry-based Func API**: `rewire.Func(t, bar.Greet, replacement)` — user never types mock variable names. Registration is generated directly from mock targets during test compilation.
 - **Intrinsic detection**: Parses the Go compiler's own intrinsics.go to detect functions that can't be mocked (replaced by CPU instructions at call sites). Fails with a clear error.
 - **`_rewire_mock` variable name**: The wrapper uses `_rewire_mock` as its local variable to avoid shadowing function parameters (e.g., math functions commonly use `f` for float64).
-- **Method support**: Methods use `(*Type).Method` / `Type.Method` syntax (matching Go method expressions and `runtime.FuncForPC` naming). Mock variable names include the type: `Mock_Server_Handle`. The mock function receives the receiver as the first argument. Method mocks are global (all instances share one mock variable).
-- **Interface mocks are codegen, not toolexec**: Interface mock generation uses `rewire mock` + `go:generate` rather than compile-time generation. This gives IDE support (gopls sees the generated types), reviewable diffs, and follows standard Go patterns.
+- **Method support**: Methods use `(*Type).Method` / `Type.Method` syntax (matching Go method expressions and `runtime.FuncForPC` naming). Mock variable names include the type: `Mock_Server_Handle`. The mock function receives the receiver as the first argument. Method mocks set via `rewire.Func` are global (all instances share one mock variable); `rewire.InstanceMethod` provides per-receiver scoping via an opt-in `_ByInstance sync.Map` the rewriter only emits when at least one InstanceMethod call references the target.
+- **Interface mocks via toolexec (`rewire.NewMock[T]`)**: The current canonical interface-mock path. The scanner detects `rewire.NewMock[I]` in test files, the toolexec generator synthesizes a backing struct for I at compile time, and the struct registers itself with the runtime via `RegisterMockFactory[I]`. Same per-instance dispatch as `rewire.InstanceMethod` for concrete methods. Generic interfaces (Phase 2a) are supported via AST-level type-parameter substitution and per-instantiation factory keys derived from `reflect.TypeFor[I]()`. The legacy `rewire mock` CLI is still supported for users who want committed reviewable mock files.
+- **Composite registry keys via type parameters**: `RegisterMockFactory[I]`, `RegisterByInstance[F]`, and `RegisterReal` derive their lookup keys through reflect at runtime, with the type passed in as a Go type parameter rather than as a pre-formatted string. This is critical for generic interfaces — `runtime.FuncForPC` reports `Container[int].Add` and `Container[string].Add` under the same name (with `[...]` placeholder), so name alone can't disambiguate. The function-type signature does. Both registration and lookup compute the key the same way (`reflect.TypeFor[F]().String()`), so the two sides cannot drift.
 
 ## Conventions
 

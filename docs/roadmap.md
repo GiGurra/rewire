@@ -20,7 +20,7 @@ Mock struct methods via Go method expressions (`(*Type).Method` or `Type.Method`
 
 Synthesize a concrete backing struct for an interface at compile time, triggered purely by a reference in a test. No `go:generate`, no committed `mock_*_test.go` files. Stubbing uses the same `rewire.InstanceMethod` verb as per-instance concrete method mocks — one API vocabulary across both. See [Interface Mocks](interface-mocks.md#toolexec-mocks-rewirenewmockt).
 
-Phase 1 handles non-generic interfaces with builtin or pre-qualified types in method signatures. Phase 2 (embedded interfaces, types from the interface's own declaring package, module-aware resolution) and Phase 3 (generic interfaces) are separate plan files under `plans/`.
+Handles non-generic interfaces *and* generic interfaces with arbitrary type-argument shapes (builtins, slices, maps, pointers, external-package types, nested generics). Each instantiation produces its own backing struct keyed on `reflect.TypeFor[I]()`. Embedded interfaces and types from the interface's own declaring package are still gaps (see Phase 2b/2c below).
 
 ### Interface mock CLI (`rewire mock`)
 
@@ -48,19 +48,15 @@ Rewire's rewrite transformation is small enough that Go's inliner inlines the wr
 
 ## In flight / planned
 
-### Phase 2 of `rewire.NewMock[T]`
+### Remaining gaps in `rewire.NewMock[T]`
 
-Cover the gaps Phase 1 left open:
+Phase 2a (generic interfaces) is shipped — see the section above. Two gaps remain:
 
-- **Embedded interfaces** — `io.ReadCloser` (`io.Reader` + `io.Closer`) and similar composed interfaces. Requires transitive method-set resolution across packages.
-- **Types from the interface's own declaring package** — an interface that returns `*Greeter` where `Greeter` lives in the same package needs the generator to qualify bare identifiers with the declaring package alias.
+- **Embedded interfaces** (Phase 2c) — `io.ReadCloser` (`io.Reader` + `io.Closer`) and similar composed interfaces. Requires transitive method-set resolution across packages.
+- **Types from the interface's own declaring package** (Phase 2b) — an interface that returns `*Greeter` where `Greeter` lives in the same package needs the generator to qualify bare identifiers with the declaring package alias.
 - **Module-aware resolution** — respect `replace` directives, workspace files, and vendor directories when locating an interface's source.
 
 See `plans/TODO_toolexec_interface_mocks_phase2.md` for the design.
-
-### Phase 3: generic interfaces
-
-`rewire.NewMock[Store[int]]` with per-instantiation dispatch, using the same pattern that already works for generic method rewriting.
 
 ### API naming pass
 

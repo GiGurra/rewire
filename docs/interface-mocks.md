@@ -93,21 +93,37 @@ func init() {
 
 `rewire.NewMock[bar.GreeterIface](t)` looks up the factory by the interface's fully-qualified name and returns a fresh instance typed as `bar.GreeterIface`. The generated method's body consults the per-instance dispatch table — the exact same `ByInstance` mechanism that backs [per-instance method mocks](method-mocking.md#per-instance-method-mocks).
 
-### Current scope (Phase 1)
+### Current scope
 
-This is an early implementation. Today it handles:
+Supported today:
 
-- Non-generic interfaces
-- Methods using builtin types (`string`, `int`, etc.) or types already qualified with an imported package selector (`context.Context`, `*http.Request`, `io.Reader`)
-- Any number of methods per interface
-- Variadic parameters, multi-return, unnamed parameters
-- Multiple mocks of the same interface, scoped independently via per-instance dispatch
+- **Non-generic interfaces** — any number of methods, any signature
+- **Generic interfaces** — single and multi-type-parameter, with arbitrary type arguments:
+    - Builtins (`int`, `string`, `bool`, etc.)
+    - Slices, maps, channels, function types
+    - Pointers (`*time.Time`)
+    - External package types (`context.Context`, `*http.Request`)
+    - Nested generic instantiations (`Container[Container[int]]`)
+    - Types from the test package itself (`Container[*User]`)
+- **Methods using imported types** — `context.Context`, `io.Reader`, etc.
+- **Variadic parameters, multi-return, unnamed parameters**
+- **Multiple mocks of the same interface** — scoped independently via per-instance dispatch
+- **Multiple instantiations of the same generic interface** — `Container[int]` and `Container[string]` produce distinct backing structs and don't collide
 
-Not yet supported (rejected with clear errors — roadmap items for Phase 2+):
+```go
+// All of these work:
+g  := rewire.NewMock[bar.GreeterIface](t)              // non-generic
+ci := rewire.NewMock[bar.Container[int]](t)            // generic, single type arg
+cs := rewire.NewMock[bar.Container[string]](t)         // distinct instantiation
+c  := rewire.NewMock[bar.Cache[string, int]](t)        // multi type args
+n  := rewire.NewMock[bar.Container[bar.Container[int]]](t)  // nested generic
+e  := rewire.NewMock[bar.Container[time.Duration]](t)  // external package type arg
+```
+
+Not yet supported (rejected with clear errors):
 
 - Embedded interfaces (`io.ReadCloser` embeds `io.Reader` + `io.Closer`)
 - Types from the interface's own declaring package (e.g. a method returning `*Greeter` where `Greeter` is defined in the same package as `GreeterIface`)
-- Generic interfaces
 
 ### Trade-offs vs the CLI / `go:generate` style
 
@@ -120,7 +136,7 @@ Not yet supported (rejected with clear errors — roadmap items for Phase 2+):
 ## CLI mocks: `rewire mock` + `go:generate`
 
 !!! note "Deprecation candidate inside rewire"
-    This style was the original interface-mocking API in rewire. It's still fully supported and will remain so for the foreseeable future, but the toolexec style above covers the common case with less ceremony and the long-term plan is to make `rewire.NewMock[T]` rewire's canonical interface-mock API. We'll keep the CLI around until the toolexec style has parity on all the cases the CLI currently handles (embedded interfaces, types from the interface's declaring package, generic interfaces) — at that point rewire's CLI mock generator may be marked deprecated. This is purely about rewire's own internal API surface; nothing is being said about the `go:generate` ecosystem in general.
+    This style was the original interface-mocking API in rewire. It's still fully supported and will remain so for the foreseeable future, but the toolexec style above covers the common case with less ceremony and the long-term plan is to make `rewire.NewMock[T]` rewire's canonical interface-mock API. The toolexec path now handles generic interfaces (added in Phase 2a); embedded interfaces and types from the interface's declaring package are the remaining gaps. Once those land too, rewire's CLI mock generator may be marked deprecated. This is purely about rewire's own internal API surface; nothing is being said about the `go:generate` ecosystem in general.
 
 For interfaces you pass in (dependency injection), rewire generates lightweight mock structs via the `rewire mock` CLI. This is standard code generation — no toolexec required.
 
@@ -296,6 +312,8 @@ rewire mock -f <source-file> -i <interface-name> [-p <package>] [-o <output-file
 - Only directly-referenced imports are included in generated code
 
 ## Current limitations
+
+These limits apply to the **CLI generator** (`rewire mock`) only. The toolexec `rewire.NewMock[T]` path above already handles generic interfaces — if you need generic interface mocking, use that instead.
 
 - Embedded interfaces are not resolved — only methods directly declared on the interface
 - Generic interfaces are not supported

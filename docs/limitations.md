@@ -1,6 +1,8 @@
 # Limitations
 
-These limitations apply to compile-time function and method mocking (toolexec). Interface mock generation is not affected — if you hit one of the behaviors below, use [interface mocks](interface-mocks.md) instead. Per-instance method stubs are supported natively — see [Per-instance method mocks](method-mocking.md#per-instance-method-mocks).
+The compiler-intrinsic, parallel-mock, bodyless-function, and build-cache items below apply to compile-time function and method mocking (toolexec). Interface mock generation has its own (smaller) set of gaps — see [Interface mocks](#interface-mocks-rewirenewmockt) at the bottom of this page.
+
+Per-instance method stubs are fully supported natively — see [Per-instance method mocks](method-mocking.md#per-instance-method-mocks).
 
 ## Compiler intrinsics
 
@@ -20,6 +22,15 @@ Two parallel tests mocking **different** functions is fine — there's no conten
 ## Bodyless functions
 
 Functions implemented in assembly (no Go body) cannot be rewritten. These are typically low-level runtime or math functions. Rewire will fail with an error if you try to mock one.
+
+## Interface mocks (`rewire.NewMock[T]`)
+
+The toolexec interface mock generator handles non-generic interfaces, generic interfaces with arbitrary type-argument shapes (builtins, slices, maps, pointers, external-package types, nested generic instantiations), and methods using imported types. The remaining gaps:
+
+- **Embedded interfaces** — an interface that includes another interface (`io.ReadCloser` embeds `io.Reader` + `io.Closer`) is rejected with a clear error. Workaround: define the composed method set inline, or use the older `rewire mock` CLI.
+- **Types from the interface's own declaring package** — an interface in `bar/` whose method signatures reference `*bar.Greeter` directly (rather than via the `bar.` qualifier) is rejected. The codegen needs to qualify bare identifiers with the declaring package alias before this works.
+
+The CLI mock generator (`rewire mock` — the older `go:generate`-style path) has a different scope: it does NOT support generic interfaces but accepts most other shapes silently. If you need generic interface mocking, use `rewire.NewMock[T]` instead.
 
 ## Build cache considerations
 
