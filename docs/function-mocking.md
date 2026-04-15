@@ -165,7 +165,7 @@ func TestMap_MockOnlyIntString(t *testing.T) {
 
 Mocks are **per-instantiation**: mocking `Map[int, string]` does not affect `Map[float64, bool]` or any other type-argument combination. You can mock multiple instantiations of the same function in a single test and each gets its own independent replacement.
 
-`rewire.Real` and `rewire.Restore` work the same way:
+`rewire.Real` and `rewire.RestoreFunc` work the same way:
 
 ```go
 // Spy on a specific instantiation
@@ -187,7 +187,7 @@ Methods on generic types work too — see [Method Mocking](method-mocking.md#met
 
 ## Restoring mocks mid-test
 
-Mocks are normally restored automatically when the test ends (via `t.Cleanup`). If you need to end a mock earlier — for example, mock a dependency during setup but run the actual test body against the real implementation — call `rewire.Restore`:
+Mocks are normally restored automatically when the test ends (via `t.Cleanup`). If you need to end a mock earlier — for example, mock a dependency during setup but run the actual test body against the real implementation — call `rewire.RestoreFunc`:
 
 ```go
 func TestFixtureSetupThenRealCall(t *testing.T) {
@@ -197,13 +197,13 @@ func TestFixtureSetupThenRealCall(t *testing.T) {
 
     // ... setup code that depends on os.Getwd returning /fixture ...
 
-    rewire.Restore(t, os.Getwd)
+    rewire.RestoreFunc(t, os.Getwd)
 
     // ... test body now sees the real os.Getwd ...
 }
 ```
 
-`Restore` is idempotent — you can call it any number of times, and it's safe to call even when no mock is currently active. The automatic cleanup installed by `Func` still runs correctly afterwards.
+`RestoreFunc` is idempotent — you can call it any number of times, and it's safe to call even when no mock is currently active. The automatic cleanup installed by `Func` still runs correctly afterwards.
 
 ## Closure capture
 

@@ -16,7 +16,7 @@ func TestNewMock_Phase1_StubAndCall(t *testing.T) {
 
 	// Stub via the same per-instance API we already have, passing the
 	// interface method expression as the target.
-	rewire.InstanceMethod(t, greeter, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
+	rewire.InstanceFunc(t, greeter, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
 		return "newmock: " + name
 	})
 
@@ -38,16 +38,16 @@ func TestNewMock_Phase1_UnstubbedReturnsZero(t *testing.T) {
 
 // Two separate mocks of the same interface — stubs on one don't affect
 // the other. This exercises the per-instance dispatch keyed on the
-// receiver pointer, same mechanism that backs rewire.InstanceMethod
+// receiver pointer, same mechanism that backs rewire.InstanceFunc
 // for rewritten concrete methods.
 func TestNewMock_Phase1_TwoInstancesScopedIndependently(t *testing.T) {
 	g1 := rewire.NewMock[bar.GreeterIface](t)
 	g2 := rewire.NewMock[bar.GreeterIface](t)
 
-	rewire.InstanceMethod(t, g1, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
+	rewire.InstanceFunc(t, g1, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
 		return "g1: " + name
 	})
-	rewire.InstanceMethod(t, g2, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
+	rewire.InstanceFunc(t, g2, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
 		return "g2: " + name
 	})
 
@@ -59,12 +59,12 @@ func TestNewMock_Phase1_TwoInstancesScopedIndependently(t *testing.T) {
 	}
 }
 
-// rewire.Restore(t, mock) clears every per-instance mock bound to the
+// rewire.RestoreInstance(t, mock) clears every per-instance mock bound to the
 // mock. Calls revert to zero-value returns.
 func TestNewMock_Phase1_RestoreClearsAllMethods(t *testing.T) {
 	greeter := rewire.NewMock[bar.GreeterIface](t)
 
-	rewire.InstanceMethod(t, greeter, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
+	rewire.InstanceFunc(t, greeter, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
 		return "stubbed: " + name
 	})
 
@@ -72,7 +72,7 @@ func TestNewMock_Phase1_RestoreClearsAllMethods(t *testing.T) {
 		t.Errorf("pre-restore: got %q", got)
 	}
 
-	rewire.Restore(t, greeter)
+	rewire.RestoreInstance(t, greeter)
 
 	if got := greeter.Greet("Alice"); got != "" {
 		t.Errorf("post-restore: got %q, want zero", got)
@@ -85,7 +85,7 @@ func TestNewMock_Phase1_RestoreClearsAllMethods(t *testing.T) {
 func TestNewMock_Phase1_PassedToProductionCode(t *testing.T) {
 	greeter := rewire.NewMock[bar.GreeterIface](t)
 
-	rewire.InstanceMethod(t, greeter, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
+	rewire.InstanceFunc(t, greeter, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
 		return "production-call: " + name
 	})
 

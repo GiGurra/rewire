@@ -1,6 +1,6 @@
 # Setup
 
-All of rewire's mock generation — function/method mocking via `rewire.Func` / `rewire.InstanceMethod`, and interface mocking via `rewire.NewMock[T]` — runs through the same `-toolexec=rewire` pipeline. So this one setup step covers everything.
+All of rewire's mock generation — function/method mocking via `rewire.Func` / `rewire.InstanceFunc`, and interface mocking via `rewire.NewMock[T]` — runs through the same `-toolexec=rewire` pipeline. So this one setup step covers everything.
 
 ## Recommended: test-specific environment
 

@@ -113,7 +113,7 @@ func TestGenericMethod_RestoreSpecificInstantiation(t *testing.T) {
 		// no-op
 	})
 
-	rewire.Restore(t, (*bar.Container[int]).Add)
+	rewire.RestoreFunc(t, (*bar.Container[int]).Add)
 
 	// After restore, int Add runs real again.
 	ci := &bar.Container[int]{}

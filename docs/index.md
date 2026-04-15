@@ -13,11 +13,11 @@ rewire.Func(t, os.Getwd, func() (string, error) { return "/mocked", nil })
 rewire.Func(t, (*bar.Server).Handle, func(s *bar.Server, req string) string { return "mocked" })
 
 // Mock a struct method, for one specific receiver only:
-rewire.InstanceMethod(t, s1, (*bar.Server).Handle, func(s *bar.Server, req string) string { return "s1-only" })
+rewire.InstanceFunc(t, s1, (*bar.Server).Handle, func(s *bar.Server, req string) string { return "s1-only" })
 
 // Create a mock of an interface with zero committed files:
 greeter := rewire.NewMock[bar.GreeterIface](t)
-rewire.InstanceMethod(t, greeter, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string { return "hi" })
+rewire.InstanceFunc(t, greeter, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string { return "hi" })
 
 // Multi-pattern stubs with call-count verification:
 e := expect.For(t, bar.Greet)
@@ -35,7 +35,7 @@ Rewire's bet is that the same compile-time rewriting machinery can cover all the
 
 - **Function-level mocks** — mock `math.Pow`, `http.Get`, or any function in any package, without an adapter layer. Unlike runtime binary patching, rewire's approach is portable, plays nicely with inlining, and doesn't require `unsafe`.
 - **Method mocks without interfaces** — mock `(*Server).Handle` globally using a Go method expression. No interface extraction, no dependency injection plumbed through the call chain.
-- **Per-instance method mocks** — `rewire.InstanceMethod` scopes a method replacement to one specific receiver. Other instances run the real method body. Traditionally this requires an interface; rewire does it via compile-time dispatch tables.
+- **Per-instance method mocks** — `rewire.InstanceFunc` scopes a method replacement to one specific receiver. Other instances run the real method body. Traditionally this requires an interface; rewire does it via compile-time dispatch tables.
 - **Interface mocks with no committed files** — `rewire.NewMock[T]` synthesizes a backing struct at compile time, triggered purely by a reference in a test. No `go:generate`, no `mock_*_test.go` files in your repo.
 - **A fluent expectation DSL** — `expect.For` / `expect.ForInstance` layer multi-pattern stubs, argument predicates, call-count bounds, and async synchronization on top of every other mocking style above. One DSL across all of them.
 

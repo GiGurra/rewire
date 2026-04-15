@@ -16,14 +16,14 @@ import (
 func TestNewMock_Embed_MixedPromotion(t *testing.T) {
 	mock := rewire.NewMock[bar.ReadCloser](t)
 
-	rewire.InstanceMethod(t, mock, bar.ReadCloser.Read, func(r bar.ReadCloser, p []byte) (int, error) {
+	rewire.InstanceFunc(t, mock, bar.ReadCloser.Read, func(r bar.ReadCloser, p []byte) (int, error) {
 		copy(p, "hi")
 		return 2, nil
 	})
-	rewire.InstanceMethod(t, mock, bar.ReadCloser.Name, func(r bar.ReadCloser) string {
+	rewire.InstanceFunc(t, mock, bar.ReadCloser.Name, func(r bar.ReadCloser) string {
 		return "mock-name"
 	})
-	rewire.InstanceMethod(t, mock, bar.ReadCloser.Close, func(r bar.ReadCloser) error {
+	rewire.InstanceFunc(t, mock, bar.ReadCloser.Close, func(r bar.ReadCloser) error {
 		return errors.New("closed")
 	})
 
@@ -70,10 +70,10 @@ func TestNewMock_Embed_UnstubbedReturnsZero(t *testing.T) {
 func TestNewMock_Embed_GenericFlow(t *testing.T) {
 	mock := rewire.NewMock[bar.ListRepo[int]](t)
 
-	rewire.InstanceMethod(t, mock, bar.ListRepo[int].Load, func(r bar.ListRepo[int], id int) int {
+	rewire.InstanceFunc(t, mock, bar.ListRepo[int].Load, func(r bar.ListRepo[int], id int) int {
 		return id * 10
 	})
-	rewire.InstanceMethod(t, mock, bar.ListRepo[int].List, func(r bar.ListRepo[int]) []int {
+	rewire.InstanceFunc(t, mock, bar.ListRepo[int].List, func(r bar.ListRepo[int]) []int {
 		return []int{1, 2, 3}
 	})
 

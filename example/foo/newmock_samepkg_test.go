@@ -15,16 +15,16 @@ import (
 func TestNewMock_SamePackageBareType(t *testing.T) {
 	mock := rewire.NewMock[bar.GreeterFactory](t)
 
-	rewire.InstanceMethod(t, mock, bar.GreeterFactory.Make, func(f bar.GreeterFactory, prefix string) *bar.Greeter {
+	rewire.InstanceFunc(t, mock, bar.GreeterFactory.Make, func(f bar.GreeterFactory, prefix string) *bar.Greeter {
 		return &bar.Greeter{Prefix: "mocked-" + prefix}
 	})
-	rewire.InstanceMethod(t, mock, bar.GreeterFactory.WrapAll, func(f bar.GreeterFactory, gs []*bar.Greeter) []*bar.Greeter {
+	rewire.InstanceFunc(t, mock, bar.GreeterFactory.WrapAll, func(f bar.GreeterFactory, gs []*bar.Greeter) []*bar.Greeter {
 		out := make([]*bar.Greeter, 0, len(gs)+1)
 		out = append(out, &bar.Greeter{Prefix: "head"})
 		out = append(out, gs...)
 		return out
 	})
-	rewire.InstanceMethod(t, mock, bar.GreeterFactory.ByName, func(f bar.GreeterFactory) map[string]*bar.Greeter {
+	rewire.InstanceFunc(t, mock, bar.GreeterFactory.ByName, func(f bar.GreeterFactory) map[string]*bar.Greeter {
 		return map[string]*bar.Greeter{
 			"alice": {Prefix: "Hi Alice"},
 			"bob":   {Prefix: "Hi Bob"},

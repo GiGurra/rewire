@@ -17,10 +17,10 @@ import (
 func TestNewMock_DotImport(t *testing.T) {
 	mock := rewire.NewMock[bar.TextProcessor](t)
 
-	rewire.InstanceMethod(t, mock, bar.TextProcessor.Tag, func(p bar.TextProcessor, f textutil.Fragment) textutil.Tag {
+	rewire.InstanceFunc(t, mock, bar.TextProcessor.Tag, func(p bar.TextProcessor, f textutil.Fragment) textutil.Tag {
 		return textutil.Tag("tag-" + f.Text)
 	})
-	rewire.InstanceMethod(t, mock, bar.TextProcessor.Highlight, func(p bar.TextProcessor, ts []textutil.Tag) []textutil.Fragment {
+	rewire.InstanceFunc(t, mock, bar.TextProcessor.Highlight, func(p bar.TextProcessor, ts []textutil.Tag) []textutil.Fragment {
 		out := make([]textutil.Fragment, len(ts))
 		for i, t := range ts {
 			out[i] = textutil.Fragment{Text: string(t), Pri: i}

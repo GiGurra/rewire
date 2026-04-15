@@ -51,7 +51,7 @@ From the moment `expect.For` returns, the target is mocked. Every subsequent `.O
 - **Per-instance concrete methods** — you want expectations that fire only when a specific receiver is called, not every `*bar.Server`.
 - **Interface methods on a `rewire.NewMock` instance** — there is no global; each mock is its own universe.
 
-Both are handled by `expect.ForInstance(t, instance, target)`. Same rule-builder API (`.On`, `.Match`, `.OnAny`, `.Returns`, `.DoFunc`, `.Times`, `.AtLeast`, `.Never`, `.Maybe`, `.Wait`), but installation goes through `rewire.InstanceMethod` under the hood so the expectation is scoped to one receiver.
+Both are handled by `expect.ForInstance(t, instance, target)`. Same rule-builder API (`.On`, `.Match`, `.OnAny`, `.Returns`, `.DoFunc`, `.Times`, `.AtLeast`, `.Never`, `.Maybe`, `.Wait`), but installation goes through `rewire.InstanceFunc` under the hood so the expectation is scoped to one receiver.
 
 ### Concrete method, per-instance
 
@@ -108,7 +108,7 @@ e2.OnAny().Returns("from g2")
 
 | Feature | `For` | `ForInstance` |
 |---|---|---|
-| Install path | `rewire.Func` (global) | `rewire.InstanceMethod` (per-receiver) |
+| Install path | `rewire.Func` (global) | `rewire.InstanceFunc` (per-receiver) |
 | Valid targets | Free functions, method expressions (concrete types) | Pointer-receiver method expressions, interface method expressions |
 | Capture of real impl | Yes (used by `.AllowUnmatched()`) | No |
 | `.AllowUnmatched()` | Supported — falls through to real | Not supported — use `.OnAny().Returns(...)` as a catch-all rule |
@@ -372,7 +372,7 @@ Per-instantiation dispatch for generics and global-per-type dispatch for methods
 ## Interactions with the rest of rewire
 
 - **`rewire.Real(t, target)`** — works normally, returns the real implementation independent of whatever dispatcher `expect.For` installed. Useful for spy-style rules that delegate to the real.
-- **`rewire.Restore(t, target)`** — early-clears the dispatcher. Subsequent calls go to the real. Unusual when combined with an active expectation, but supported. Verification still runs at cleanup.
+- **`rewire.RestoreFunc(t, target)` / `rewire.RestoreInstance(t, instance)`** — early-clears the dispatcher. Subsequent calls go to the real. Unusual when combined with an active expectation, but supported. Verification still runs at cleanup.
 - **`rewire.Func(t, target, ...)` alongside `expect.For(t, target)`** — don't do this. The second install clobbers the first. `expect.For` **is** the mocking step; use it instead of `rewire.Func`, not alongside.
 
 ## Error reporting

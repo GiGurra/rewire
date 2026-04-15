@@ -13,7 +13,7 @@ import (
 	"github.com/GiGurra/rewire/pkg/rewire"
 )
 
-// All tests in this file use rewire.NewMock[I] + rewire.InstanceMethod
+// All tests in this file use rewire.NewMock[I] + rewire.InstanceFunc
 // to mock the bar.* interfaces. The toolexec wrapper synthesizes the
 // backing struct at compile time, so there are no committed mock
 // files in the repo and no go:generate step.
@@ -22,7 +22,7 @@ import (
 
 func TestGreetAll(t *testing.T) {
 	mock := rewire.NewMock[bar.GreeterIface](t)
-	rewire.InstanceMethod(t, mock, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
+	rewire.InstanceFunc(t, mock, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
 		return "Hi, " + name
 	})
 
@@ -42,7 +42,7 @@ func TestGreetAll(t *testing.T) {
 func TestGreetAll_Empty(t *testing.T) {
 	callCount := 0
 	mock := rewire.NewMock[bar.GreeterIface](t)
-	rewire.InstanceMethod(t, mock, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
+	rewire.InstanceFunc(t, mock, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
 		callCount++
 		return ""
 	})
@@ -59,7 +59,7 @@ func TestGreetAll_Empty(t *testing.T) {
 func TestGreetAll_CallTracking(t *testing.T) {
 	var calls []string
 	mock := rewire.NewMock[bar.GreeterIface](t)
-	rewire.InstanceMethod(t, mock, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
+	rewire.InstanceFunc(t, mock, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
 		calls = append(calls, name)
 		return "Hello"
 	})
@@ -78,7 +78,7 @@ func TestGreetAll_CallTracking(t *testing.T) {
 
 func TestGetOrDefault_Found(t *testing.T) {
 	mock := rewire.NewMock[bar.Store](t)
-	rewire.InstanceMethod(t, mock, bar.Store.Get, func(s bar.Store, key string) (string, error) {
+	rewire.InstanceFunc(t, mock, bar.Store.Get, func(s bar.Store, key string) (string, error) {
 		if key == "name" {
 			return "Alice", nil
 		}
@@ -93,7 +93,7 @@ func TestGetOrDefault_Found(t *testing.T) {
 
 func TestGetOrDefault_NotFound(t *testing.T) {
 	mock := rewire.NewMock[bar.Store](t)
-	rewire.InstanceMethod(t, mock, bar.Store.Get, func(s bar.Store, key string) (string, error) {
+	rewire.InstanceFunc(t, mock, bar.Store.Get, func(s bar.Store, key string) (string, error) {
 		return "", errors.New("not found")
 	})
 
@@ -118,18 +118,18 @@ func TestMigrateKey_Success(t *testing.T) {
 	data := map[string]string{"old": "value"}
 
 	mock := rewire.NewMock[bar.Store](t)
-	rewire.InstanceMethod(t, mock, bar.Store.Get, func(s bar.Store, key string) (string, error) {
+	rewire.InstanceFunc(t, mock, bar.Store.Get, func(s bar.Store, key string) (string, error) {
 		v, ok := data[key]
 		if !ok {
 			return "", errors.New("not found")
 		}
 		return v, nil
 	})
-	rewire.InstanceMethod(t, mock, bar.Store.Set, func(s bar.Store, key, value string) error {
+	rewire.InstanceFunc(t, mock, bar.Store.Set, func(s bar.Store, key, value string) error {
 		data[key] = value
 		return nil
 	})
-	rewire.InstanceMethod(t, mock, bar.Store.Delete, func(s bar.Store, key string) error {
+	rewire.InstanceFunc(t, mock, bar.Store.Delete, func(s bar.Store, key string) error {
 		delete(data, key)
 		return nil
 	})
@@ -149,7 +149,7 @@ func TestMigrateKey_Success(t *testing.T) {
 
 func TestMigrateKey_GetFails(t *testing.T) {
 	mock := rewire.NewMock[bar.Store](t)
-	rewire.InstanceMethod(t, mock, bar.Store.Get, func(s bar.Store, key string) (string, error) {
+	rewire.InstanceFunc(t, mock, bar.Store.Get, func(s bar.Store, key string) (string, error) {
 		return "", errors.New("db down")
 	})
 
@@ -161,10 +161,10 @@ func TestMigrateKey_GetFails(t *testing.T) {
 
 func TestMigrateKey_SetFails(t *testing.T) {
 	mock := rewire.NewMock[bar.Store](t)
-	rewire.InstanceMethod(t, mock, bar.Store.Get, func(s bar.Store, key string) (string, error) {
+	rewire.InstanceFunc(t, mock, bar.Store.Get, func(s bar.Store, key string) (string, error) {
 		return "value", nil
 	})
-	rewire.InstanceMethod(t, mock, bar.Store.Set, func(s bar.Store, key, value string) error {
+	rewire.InstanceFunc(t, mock, bar.Store.Set, func(s bar.Store, key, value string) error {
 		return errors.New("read-only")
 	})
 
@@ -176,13 +176,13 @@ func TestMigrateKey_SetFails(t *testing.T) {
 
 func TestMigrateKey_DeleteFails(t *testing.T) {
 	mock := rewire.NewMock[bar.Store](t)
-	rewire.InstanceMethod(t, mock, bar.Store.Get, func(s bar.Store, key string) (string, error) {
+	rewire.InstanceFunc(t, mock, bar.Store.Get, func(s bar.Store, key string) (string, error) {
 		return "value", nil
 	})
-	rewire.InstanceMethod(t, mock, bar.Store.Set, func(s bar.Store, key, value string) error {
+	rewire.InstanceFunc(t, mock, bar.Store.Set, func(s bar.Store, key, value string) error {
 		return nil
 	})
-	rewire.InstanceMethod(t, mock, bar.Store.Delete, func(s bar.Store, key string) error {
+	rewire.InstanceFunc(t, mock, bar.Store.Delete, func(s bar.Store, key string) error {
 		return errors.New("permission denied")
 	})
 
@@ -197,12 +197,12 @@ func TestMigrateKey_DeleteFails(t *testing.T) {
 func TestLogAndGreet(t *testing.T) {
 	var logged []string
 	logger := rewire.NewMock[bar.Logger](t)
-	rewire.InstanceMethod(t, logger, bar.Logger.Logf, func(l bar.Logger, format string, args ...any) {
+	rewire.InstanceFunc(t, logger, bar.Logger.Logf, func(l bar.Logger, format string, args ...any) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	})
 
 	greeter := rewire.NewMock[bar.GreeterIface](t)
-	rewire.InstanceMethod(t, greeter, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
+	rewire.InstanceFunc(t, greeter, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
 		return "Hey, " + name + "!"
 	})
 
@@ -223,7 +223,7 @@ func TestLogAndGreet_UnsetLogger(t *testing.T) {
 	// Logger with no stubs — Logf is a no-op (zero value, void return).
 	logger := rewire.NewMock[bar.Logger](t)
 	greeter := rewire.NewMock[bar.GreeterIface](t)
-	rewire.InstanceMethod(t, greeter, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
+	rewire.InstanceFunc(t, greeter, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
 		return "hi"
 	})
 
@@ -236,7 +236,7 @@ func TestLogAndGreet_UnsetLogger(t *testing.T) {
 func TestLogger_LogCallTracking(t *testing.T) {
 	var messages []string
 	logger := rewire.NewMock[bar.Logger](t)
-	rewire.InstanceMethod(t, logger, bar.Logger.Log, func(l bar.Logger, msg string) {
+	rewire.InstanceFunc(t, logger, bar.Logger.Log, func(l bar.Logger, msg string) {
 		messages = append(messages, msg)
 	})
 
@@ -256,7 +256,7 @@ func TestLogger_LogCallTracking(t *testing.T) {
 
 func TestFetchBody_Success(t *testing.T) {
 	client := rewire.NewMock[bar.HTTPClient](t)
-	rewire.InstanceMethod(t, client, bar.HTTPClient.Do, func(c bar.HTTPClient, ctx context.Context, req *http.Request) (*http.Response, error) {
+	rewire.InstanceFunc(t, client, bar.HTTPClient.Do, func(c bar.HTTPClient, ctx context.Context, req *http.Request) (*http.Response, error) {
 		if req.URL.String() != "https://example.com" {
 			t.Errorf("unexpected URL: %s", req.URL)
 		}
@@ -280,7 +280,7 @@ func TestFetchBody_Success(t *testing.T) {
 
 func TestFetchBody_RequestError(t *testing.T) {
 	client := rewire.NewMock[bar.HTTPClient](t)
-	rewire.InstanceMethod(t, client, bar.HTTPClient.Do, func(c bar.HTTPClient, ctx context.Context, req *http.Request) (*http.Response, error) {
+	rewire.InstanceFunc(t, client, bar.HTTPClient.Do, func(c bar.HTTPClient, ctx context.Context, req *http.Request) (*http.Response, error) {
 		return nil, errors.New("connection refused")
 	})
 
@@ -292,7 +292,7 @@ func TestFetchBody_RequestError(t *testing.T) {
 
 func TestFetchBody_ContextCancelled(t *testing.T) {
 	client := rewire.NewMock[bar.HTTPClient](t)
-	rewire.InstanceMethod(t, client, bar.HTTPClient.Do, func(c bar.HTTPClient, ctx context.Context, req *http.Request) (*http.Response, error) {
+	rewire.InstanceFunc(t, client, bar.HTTPClient.Do, func(c bar.HTTPClient, ctx context.Context, req *http.Request) (*http.Response, error) {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -314,7 +314,7 @@ func TestFetchBody_ContextCancelled(t *testing.T) {
 func TestFetchBody_RequestTracking(t *testing.T) {
 	var requests []*http.Request
 	client := rewire.NewMock[bar.HTTPClient](t)
-	rewire.InstanceMethod(t, client, bar.HTTPClient.Do, func(c bar.HTTPClient, ctx context.Context, req *http.Request) (*http.Response, error) {
+	rewire.InstanceFunc(t, client, bar.HTTPClient.Do, func(c bar.HTTPClient, ctx context.Context, req *http.Request) (*http.Response, error) {
 		requests = append(requests, req)
 		return &http.Response{
 			StatusCode: 200,
@@ -339,7 +339,7 @@ func TestFetchBody_RequestTracking(t *testing.T) {
 func TestUploadString_Success(t *testing.T) {
 	var capturedBody string
 	client := rewire.NewMock[bar.HTTPClient](t)
-	rewire.InstanceMethod(t, client, bar.HTTPClient.Upload, func(c bar.HTTPClient, ctx context.Context, url string, body io.Reader) (int64, error) {
+	rewire.InstanceFunc(t, client, bar.HTTPClient.Upload, func(c bar.HTTPClient, ctx context.Context, url string, body io.Reader) (int64, error) {
 		data, _ := io.ReadAll(body)
 		capturedBody = string(data)
 		return int64(len(data)), nil
@@ -359,7 +359,7 @@ func TestUploadString_Success(t *testing.T) {
 
 func TestUploadString_Error(t *testing.T) {
 	client := rewire.NewMock[bar.HTTPClient](t)
-	rewire.InstanceMethod(t, client, bar.HTTPClient.Upload, func(c bar.HTTPClient, ctx context.Context, url string, body io.Reader) (int64, error) {
+	rewire.InstanceFunc(t, client, bar.HTTPClient.Upload, func(c bar.HTTPClient, ctx context.Context, url string, body io.Reader) (int64, error) {
 		return 0, errors.New("upload failed")
 	})
 

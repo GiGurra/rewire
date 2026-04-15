@@ -194,7 +194,7 @@ func TestDescribe_MockedPing(t *testing.T) {
 
 func TestStore_Mocked(t *testing.T) {
 	m := rewire.NewMock[shared.Store](t)
-	rewire.InstanceMethod(t, m, shared.Store.Get, func(s shared.Store, key string) string {
+	rewire.InstanceFunc(t, m, shared.Store.Get, func(s shared.Store, key string) string {
 		return "mocked-" + key
 	})
 	if got := m.Get("x"); got != "mocked-x" {

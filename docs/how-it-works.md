@@ -86,12 +86,12 @@ The `Real_Server_Handle` alias is a method expression of type `func(*Server, str
 
 ## Per-instance method dispatch
 
-When the scanner sees at least one `rewire.InstanceMethod(t, instance, target, ...)` or `rewire.RestoreInstanceMethod(...)` call referencing a pointer-receiver method, the rewriter emits an additional dispatch path on top of the shape above. A per-method `sync.Map` is added, keyed on the receiver pointer, and the wrapper body consults it before the global mock:
+When the scanner sees at least one `rewire.InstanceFunc(t, instance, target, ...)` or `rewire.RestoreInstanceFunc(...)` call referencing a pointer-receiver method, the rewriter emits an additional dispatch path on top of the shape above. A per-method `sync.Map` is added, keyed on the receiver pointer, and the wrapper body consults it before the global mock:
 
 ```go
-// Rewritten (in-memory) when rewire.InstanceMethod targets (*Server).Handle
+// Rewritten (in-memory) when rewire.InstanceFunc targets (*Server).Handle
 var Mock_Server_Handle            func(*Server, string) string
-var Mock_Server_Handle_ByInstance sync.Map  // new — only emitted if InstanceMethod is used
+var Mock_Server_Handle_ByInstance sync.Map  // new — only emitted if InstanceFunc is used
 
 func (s *Server) Handle(req string) string {
     // 1. Per-instance lookup — keyed on the receiver pointer.
@@ -109,13 +109,13 @@ func (s *Server) Handle(req string) string {
 }
 ```
 
-Dispatch order is **per-instance → global → real**, so `rewire.InstanceMethod` overrides `rewire.Func` for the specific receiver while other instances still see the global mock (or the real body).
+Dispatch order is **per-instance → global → real**, so `rewire.InstanceFunc` overrides `rewire.Func` for the specific receiver while other instances still see the global mock (or the real body).
 
-**Emission is opt-in.** Tests that only use `rewire.Func` on methods don't get the `_ByInstance` sync.Map or the extra lookup — the scanner gates emission on whether any test in the module references the method via `InstanceMethod` / `RestoreInstanceMethod`. Zero per-call overhead for tests that don't need per-instance scoping.
+**Emission is opt-in.** Tests that only use `rewire.Func` on methods don't get the `_ByInstance` sync.Map or the extra lookup — the scanner gates emission on whether any test in the module references the method via `InstanceFunc` / `RestoreInstanceFunc`. Zero per-call overhead for tests that don't need per-instance scoping.
 
-**`rewire.Restore` is overloaded** to match. Passing a function target clears the global mock (existing behavior); passing an instance value walks every registered `_ByInstance` sync.Map and deletes entries keyed on that instance, clearing all per-instance mocks bound to the receiver in one call.
+**Three restore verbs.** `rewire.RestoreFunc(t, target)` clears the global mock for a function or method. `rewire.RestoreInstance(t, instance)` walks every registered `_ByInstance` sync.Map and drops entries keyed on that instance — all per-instance mocks bound to the receiver in one call. `rewire.RestoreInstanceFunc(t, instance, target)` clears exactly one `(instance, method)` pair.
 
-**`any(instance)` as the key.** `rewire.InstanceMethod` stores the receiver as `any(instance)` so interface equality compares both dynamic type and pointer value. This matters for generic methods: `*Container[int]` and `*Container[string]` keys never collide even at the same address.
+**`any(instance)` as the key.** `rewire.InstanceFunc` stores the receiver as `any(instance)` so interface equality compares both dynamic type and pointer value. This matters for generic methods: `*Container[int]` and `*Container[string]` keys never collide even at the same address.
 
 ## Interface mocks via `rewire.NewMock[T]`
 
@@ -158,8 +158,8 @@ func init() {
 At test time:
 
 - `rewire.NewMock[bar.GreeterIface](t)` looks up the factory by the interface's full name and returns `factory()` type-asserted back to `bar.GreeterIface`.
-- `rewire.InstanceMethod(t, mock, bar.GreeterIface.Greet, replacement)` resolves `bar.GreeterIface.Greet` via `runtime.FuncForPC` — which does return a stable, parseable name for interface method expressions — and stores the replacement in the registered `_ByInstance` sync.Map.
-- The backing struct's method body loads from the same sync.Map on every call, so stubs set via `InstanceMethod` route correctly and unstubbed methods return zero values.
+- `rewire.InstanceFunc(t, mock, bar.GreeterIface.Greet, replacement)` resolves `bar.GreeterIface.Greet` via `runtime.FuncForPC` — which does return a stable, parseable name for interface method expressions — and stores the replacement in the registered `_ByInstance` sync.Map.
+- The backing struct's method body loads from the same sync.Map on every call, so stubs set via `InstanceFunc` route correctly and unstubbed methods return zero values.
 
 **The `[1]byte` padding field is load-bearing.** Go's spec explicitly allows pointers to distinct zero-size variables to compare equal, which means two `&emptyStruct{}` allocations may share an address and collide in the per-instance sync.Map. A one-byte padding field forces distinct allocations to get distinct addresses.
 

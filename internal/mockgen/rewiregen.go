@@ -101,7 +101,7 @@ func (d *dotImportInfo) empty() bool {
 // interface `interfaceName` (resolved from `src`). The generated
 // backing struct uses per-instance dispatch via package-level
 // sync.Maps and registers itself with the rewire runtime via init()
-// so that rewire.NewMock[I] and rewire.InstanceMethod work on it.
+// so that rewire.NewMock[I] and rewire.InstanceFunc work on it.
 //
 // The generated file is injected into the test package's compile args
 // by the toolexec wrapper — it never lives on disk, never appears in

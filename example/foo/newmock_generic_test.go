@@ -19,7 +19,7 @@ func TestNewMock_Generic_SingleTypeParam_Int(t *testing.T) {
 
 	// Stub Add via the interface method expression.
 	var added []int
-	rewire.InstanceMethod(t, c, bar.ContainerIface[int].Add, func(c bar.ContainerIface[int], v int) {
+	rewire.InstanceFunc(t, c, bar.ContainerIface[int].Add, func(c bar.ContainerIface[int], v int) {
 		added = append(added, v)
 	})
 
@@ -40,10 +40,10 @@ func TestNewMock_Generic_DistinctInstantiations(t *testing.T) {
 	ci := rewire.NewMock[bar.ContainerIface[int]](t)
 	cs := rewire.NewMock[bar.ContainerIface[string]](t)
 
-	rewire.InstanceMethod(t, ci, bar.ContainerIface[int].Get, func(c bar.ContainerIface[int], i int) int {
+	rewire.InstanceFunc(t, ci, bar.ContainerIface[int].Get, func(c bar.ContainerIface[int], i int) int {
 		return 42
 	})
-	rewire.InstanceMethod(t, cs, bar.ContainerIface[string].Get, func(c bar.ContainerIface[string], i int) string {
+	rewire.InstanceFunc(t, cs, bar.ContainerIface[string].Get, func(c bar.ContainerIface[string], i int) string {
 		return "answer"
 	})
 
@@ -61,7 +61,7 @@ func TestNewMock_Generic_DistinctInstantiations(t *testing.T) {
 func TestNewMock_Generic_NonGenericMethod(t *testing.T) {
 	c := rewire.NewMock[bar.ContainerIface[int]](t)
 
-	rewire.InstanceMethod(t, c, bar.ContainerIface[int].Len, func(c bar.ContainerIface[int]) int {
+	rewire.InstanceFunc(t, c, bar.ContainerIface[int].Len, func(c bar.ContainerIface[int]) int {
 		return 99
 	})
 
@@ -81,13 +81,13 @@ func TestNewMock_Generic_NonGenericMethod(t *testing.T) {
 func TestNewMock_Generic_NestedSamePackage(t *testing.T) {
 	// Build an inner mock to use as a stub return value.
 	inner := rewire.NewMock[bar.ContainerIface[int]](t)
-	rewire.InstanceMethod(t, inner, bar.ContainerIface[int].Len, func(c bar.ContainerIface[int]) int {
+	rewire.InstanceFunc(t, inner, bar.ContainerIface[int].Len, func(c bar.ContainerIface[int]) int {
 		return 7
 	})
 
 	// Build an outer mock keyed on Container[Container[int]].
 	outer := rewire.NewMock[bar.ContainerIface[bar.ContainerIface[int]]](t)
-	rewire.InstanceMethod(t, outer, bar.ContainerIface[bar.ContainerIface[int]].Get,
+	rewire.InstanceFunc(t, outer, bar.ContainerIface[bar.ContainerIface[int]].Get,
 		func(c bar.ContainerIface[bar.ContainerIface[int]], i int) bar.ContainerIface[int] {
 			return inner
 		})
@@ -108,7 +108,7 @@ func TestNewMock_Generic_PointerTypeArg(t *testing.T) {
 	c := rewire.NewMock[bar.ContainerIface[*User]](t)
 
 	stored := []*User{}
-	rewire.InstanceMethod(t, c, bar.ContainerIface[*User].Add, func(c bar.ContainerIface[*User], v *User) {
+	rewire.InstanceFunc(t, c, bar.ContainerIface[*User].Add, func(c bar.ContainerIface[*User], v *User) {
 		stored = append(stored, v)
 	})
 
@@ -127,7 +127,7 @@ func TestNewMock_Generic_PointerTypeArg(t *testing.T) {
 func TestNewMock_Generic_SliceTypeArg(t *testing.T) {
 	c := rewire.NewMock[bar.ContainerIface[[]int]](t)
 
-	rewire.InstanceMethod(t, c, bar.ContainerIface[[]int].Get, func(c bar.ContainerIface[[]int], i int) []int {
+	rewire.InstanceFunc(t, c, bar.ContainerIface[[]int].Get, func(c bar.ContainerIface[[]int], i int) []int {
 		return []int{i, i * 2, i * 3}
 	})
 
@@ -146,7 +146,7 @@ func TestNewMock_Generic_SliceTypeArg(t *testing.T) {
 func TestNewMock_Generic_ExternalPackageTypeArg(t *testing.T) {
 	c := rewire.NewMock[bar.ContainerIface[time.Duration]](t)
 
-	rewire.InstanceMethod(t, c, bar.ContainerIface[time.Duration].Get,
+	rewire.InstanceFunc(t, c, bar.ContainerIface[time.Duration].Get,
 		func(c bar.ContainerIface[time.Duration], i int) time.Duration {
 			return time.Duration(i) * time.Second
 		})
@@ -160,7 +160,7 @@ func TestNewMock_Generic_ExternalPackageTypeArg(t *testing.T) {
 func TestNewMock_Generic_MapTypeArg(t *testing.T) {
 	c := rewire.NewMock[bar.ContainerIface[map[string]int]](t)
 
-	rewire.InstanceMethod(t, c, bar.ContainerIface[map[string]int].Get,
+	rewire.InstanceFunc(t, c, bar.ContainerIface[map[string]int].Get,
 		func(c bar.ContainerIface[map[string]int], i int) map[string]int {
 			return map[string]int{"key": i}
 		})
@@ -178,10 +178,10 @@ func TestNewMock_Generic_MultipleTypeParams(t *testing.T) {
 	c := rewire.NewMock[bar.CacheIface[string, int]](t)
 
 	store := map[string]int{}
-	rewire.InstanceMethod(t, c, bar.CacheIface[string, int].Set, func(c bar.CacheIface[string, int], k string, v int) {
+	rewire.InstanceFunc(t, c, bar.CacheIface[string, int].Set, func(c bar.CacheIface[string, int], k string, v int) {
 		store[k] = v
 	})
-	rewire.InstanceMethod(t, c, bar.CacheIface[string, int].Get, func(c bar.CacheIface[string, int], k string) (int, bool) {
+	rewire.InstanceFunc(t, c, bar.CacheIface[string, int].Get, func(c bar.CacheIface[string, int], k string) (int, bool) {
 		v, ok := store[k]
 		return v, ok
 	})

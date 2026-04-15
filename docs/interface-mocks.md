@@ -19,7 +19,7 @@ import (
 func TestService_GreetingFlow(t *testing.T) {
     greeter := rewire.NewMock[bar.GreeterIface](t)
 
-    rewire.InstanceMethod(t, greeter, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
+    rewire.InstanceFunc(t, greeter, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
         return "mocked: " + name
     })
 
@@ -35,8 +35,8 @@ Stubs are per-instance, so two mocks of the same interface are independent:
 g1 := rewire.NewMock[bar.GreeterIface](t)
 g2 := rewire.NewMock[bar.GreeterIface](t)
 
-rewire.InstanceMethod(t, g1, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string { return "g1: " + name })
-rewire.InstanceMethod(t, g2, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string { return "g2: " + name })
+rewire.InstanceFunc(t, g1, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string { return "g1: " + name })
+rewire.InstanceFunc(t, g2, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string { return "g2: " + name })
 
 g1.Greet("Alice") // "g1: Alice"
 g2.Greet("Bob")   // "g2: Bob"
@@ -49,13 +49,13 @@ greeter := rewire.NewMock[bar.GreeterIface](t)
 greeter.Greet("Alice") // ""  — no stub, returns the zero value
 ```
 
-Clear every stub on a mock with `rewire.Restore`:
+Clear every stub on a mock with `rewire.RestoreInstance`:
 
 ```go
-rewire.Restore(t, greeter) // drops every per-instance stub on greeter
+rewire.RestoreInstance(t, greeter) // drops every per-instance stub on greeter
 ```
 
-Individual stubs can be cleared with `rewire.RestoreInstanceMethod(t, greeter, bar.GreeterIface.Greet)`.
+Individual stubs can be cleared with `rewire.RestoreInstanceFunc(t, greeter, bar.GreeterIface.Greet)`.
 
 ### How it works
 
@@ -69,7 +69,7 @@ var Mock__rewire_mock_bar_GreeterIface_Greet_ByInstance sync.Map
 
 func (m *_rewire_mock_bar_GreeterIface) Greet(name string) (_r0 string) {
     // per-instance dispatch — same mechanism that backs
-    // rewire.InstanceMethod for rewritten concrete methods.
+    // rewire.InstanceFunc for rewritten concrete methods.
     ...
 }
 
@@ -125,7 +125,7 @@ Stubbing a promoted method uses the OUTER interface as the receiver in the metho
 ```go
 rc := rewire.NewMock[bar.ReadCloser](t)
 // Read is promoted from io.Reader but stubbed via bar.ReadCloser.Read:
-rewire.InstanceMethod(t, rc, bar.ReadCloser.Read, func(r bar.ReadCloser, p []byte) (int, error) {
+rewire.InstanceFunc(t, rc, bar.ReadCloser.Read, func(r bar.ReadCloser, p []byte) (int, error) {
     return copy(p, "hi"), nil
 })
 ```

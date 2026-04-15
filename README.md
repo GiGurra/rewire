@@ -16,11 +16,11 @@ rewire.Func(t, os.Getwd, func() (string, error) { return "/mocked", nil })
 rewire.Func(t, (*bar.Server).Handle, func(s *bar.Server, req string) string { return "mocked" })
 
 // Mock a struct method, for one specific receiver only:
-rewire.InstanceMethod(t, s1, (*bar.Server).Handle, func(s *bar.Server, req string) string { return "s1-only" })
+rewire.InstanceFunc(t, s1, (*bar.Server).Handle, func(s *bar.Server, req string) string { return "s1-only" })
 
 // Create a mock of an interface with zero committed files:
 greeter := rewire.NewMock[bar.GreeterIface](t)
-rewire.InstanceMethod(t, greeter, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string { return "hi" })
+rewire.InstanceFunc(t, greeter, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string { return "hi" })
 
 // Multi-pattern stubs with call-count verification:
 e := expect.For(t, bar.Greet)
@@ -85,7 +85,7 @@ rewire.Func(t, bar.Greet, func(name string) string {
 })
 ```
 
-**Mid-test cleanup** — `rewire.Restore(t, target)` ends a mock early if you want the real implementation back before the test finishes. Idempotent.
+**Mid-test cleanup** — `rewire.RestoreFunc(t, target)` ends a function mock early if you want the real implementation back before the test finishes. `rewire.RestoreInstance(t, instance)` clears every per-instance mock bound to one receiver. Both are idempotent.
 
 See [Function Mocking](docs/function-mocking.md) for the full feature set.
 
@@ -115,7 +115,7 @@ For tests where only one specific receiver should be mocked:
 s1 := &bar.Server{Name: "primary"}
 s2 := &bar.Server{Name: "secondary"}
 
-rewire.InstanceMethod(t, s1, (*bar.Server).Handle, func(s *bar.Server, req string) string {
+rewire.InstanceFunc(t, s1, (*bar.Server).Handle, func(s *bar.Server, req string) string {
     return "primary-mock: " + req
 })
 
@@ -123,12 +123,12 @@ s1.Handle("ping") // "primary-mock: ping"  — per-instance mock
 s2.Handle("ping") // real Handle body      — s2 is untouched
 ```
 
-Dispatch order inside the wrapper is per-instance → global → real, so per-instance and global mocks compose. You can `rewire.Restore(t, s1)` to drop every per-instance mock bound to `s1` at once, or `rewire.RestoreInstanceMethod(t, s1, target)` for one specific entry.
+Dispatch order inside the wrapper is per-instance → global → real, so per-instance and global mocks compose. You can `rewire.RestoreInstance(t, s1)` to drop every per-instance mock bound to `s1` at once, or `rewire.RestoreInstanceFunc(t, s1, target)` for one specific entry.
 
 Works for generic methods too:
 
 ```go
-rewire.InstanceMethod(t, c1, (*bar.Container[int]).Add, func(c *bar.Container[int], v int) {
+rewire.InstanceFunc(t, c1, (*bar.Container[int]).Add, func(c *bar.Container[int], v int) {
     // swallow — c1 never actually appends
 })
 ```
@@ -144,7 +144,7 @@ See [Method Mocking](docs/method-mocking.md) for the full feature set.
 func TestService_GreetingFlow(t *testing.T) {
     greeter := rewire.NewMock[bar.GreeterIface](t)
 
-    rewire.InstanceMethod(t, greeter, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
+    rewire.InstanceFunc(t, greeter, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
         return "mocked: " + name
     })
 
@@ -154,11 +154,11 @@ func TestService_GreetingFlow(t *testing.T) {
 }
 ```
 
-No `go:generate` step. No `mock_*_test.go` files committed to the repo. The toolexec wrapper scans test files for `rewire.NewMock[X]` references, parses the interface's source, and synthesizes a backing struct into the test package's compile args. The struct satisfies `X`, routes method calls through the same per-instance dispatch tables that back `rewire.InstanceMethod`, and disappears the moment the test binary finishes.
+No `go:generate` step. No `mock_*_test.go` files committed to the repo. The toolexec wrapper scans test files for `rewire.NewMock[X]` references, parses the interface's source, and synthesizes a backing struct into the test package's compile args. The struct satisfies `X`, routes method calls through the same per-instance dispatch tables that back `rewire.InstanceFunc`, and disappears the moment the test binary finishes.
 
 - Two mocks of the same interface are scoped independently — stubs on one don't leak to the other.
 - Unstubbed methods return zero values.
-- `rewire.Restore(t, mock)` clears every stub on a mock.
+- `rewire.RestoreInstance(t, mock)` clears every stub on a mock.
 
 **Current scope:** non-generic and generic interfaces (any type-argument shape, including nested generics and external-package type args), embedded interfaces (same-file, same-package, cross-package, and generic embeds with type-parameter flow), methods using bare same-package identifiers like `*Greeter` (auto-qualified), and interfaces declared in files that use dot imports (`import . "pkg"` — the generator detects the dot import, lists the dot-imported package's exported types, and qualifies bare idents with the dot-imported alias rather than the declaring package). Package lookup goes through `go list`, so `replace` directives in `go.mod`, workspace files (`go.work`), and vendor directories all work as expected. Each generic instantiation produces its own backing struct keyed by reflect's instantiation-aware type name.
 
@@ -212,8 +212,7 @@ Go has plenty of mocking libraries, but most of them pick *one* spot on this gri
 |---|---|---|
 | Mock a stdlib or third-party function | Runtime binary patching (unsafe, platform-specific, breaks under inlining) | Compile-time rewrite (safe, portable, verified compatible with inlining) |
 | Mock a struct method without touching production code | Extract an interface + dependency injection | Method expression — no interface, no DI |
-| Mock *one specific instance* of a type | Extract an interface, inject per instance | `rewire.InstanceMethod` — scoped by receiver pointer |
-| Mock an interface | `go:generate` a mock file, commit it, regenerate on every change | `rewire.NewMock[T]` — backing struct synthesized at compile time, nothing generated, nothing committed |
+| Mock *one specific instance* of a type | Extract an interface, inject per instance | `rewire.InstanceFunc` — scoped by receiver pointer || Mock an interface | `go:generate` a mock file, commit it, regenerate on every change | `rewire.NewMock[T]` — backing struct synthesized at compile time, nothing generated, nothing committed |
 | Multi-pattern expectations with call-count verification | A separate DSL tied to one of the above styles | `expect.For` / `expect.ForInstance` — the same DSL works on *all* of the above |
 
 Each cell of rewire's column uses the same compile-time rewriting machinery underneath, so they compose. You can mix global mocks, per-instance mocks, and interface mocks in a single test, all with the same verbs.
@@ -225,11 +224,11 @@ Each cell of rewire's column uses the same compile-time rewriting machinery unde
 <details>
 <summary><strong>How it works</strong> — compile-time rewriting via <code>-toolexec</code></summary>
 
-1. **Pre-scan** — rewire walks `_test.go` files in your module and collects every `rewire.Func` / `rewire.InstanceMethod` / `rewire.NewMock[T]` reference. This builds a target list.
+1. **Pre-scan** — rewire walks `_test.go` files in your module and collects every `rewire.Func` / `rewire.InstanceFunc` / `rewire.NewMock[T]` reference. This builds a target list.
 2. **Targeted rewrite** — when the Go compiler processes a package containing targeted functions or methods, rewire intercepts it via `-toolexec` and rewrites exactly those functions to route through a package-level mock variable and a nil-check wrapper. Everything else in the package compiles normally.
 3. **Interface mock generation** — for each `rewire.NewMock[X]` target, rewire parses `X`'s source at compile time and synthesizes a concrete backing struct into the test package's compile args.
 4. **Registration** — when compiling a test package, rewire generates an `init()` file that registers mock variable pointers (and per-instance dispatch tables, and mock factories) in a runtime registry.
-5. **Runtime swap** — `rewire.Func` / `rewire.InstanceMethod` use `runtime.FuncForPC` to resolve the target name, look up the registry entry, and install the replacement via `reflect`. `t.Cleanup` restores the original.
+5. **Runtime swap** — `rewire.Func` / `rewire.InstanceFunc` use `runtime.FuncForPC` to resolve the target name, look up the registry entry, and install the replacement via `reflect`. `t.Cleanup` restores the original.
 
 Only functions and methods explicitly referenced in rewire calls are rewritten. Everything else passes through the compiler untouched — no whole-module overhead.
 

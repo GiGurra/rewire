@@ -75,7 +75,7 @@ func TestExpectForInstance_TwoMocksIndependent(t *testing.T) {
 
 // DoFunc captures arguments into the test body — a common spy pattern
 // that also exercises the typed-callback response path through
-// InstanceMethod dispatch.
+// InstanceFunc dispatch.
 func TestExpectForInstance_DoFuncSpy(t *testing.T) {
 	greeter := rewire.NewMock[bar.GreeterIface](t)
 

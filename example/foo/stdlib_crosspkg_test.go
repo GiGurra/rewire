@@ -36,7 +36,7 @@ func TestRestore_EndsMockMidTest(t *testing.T) {
 		t.Fatalf("precondition failed: mock not active, got %q", mocked)
 	}
 
-	rewire.Restore(t, os.Getwd)
+	rewire.RestoreFunc(t, os.Getwd)
 
 	real, err := filepath.Abs("foo")
 	if err != nil {
@@ -54,9 +54,9 @@ func TestRestore_IsIdempotent(t *testing.T) {
 
 	// Calling Restore repeatedly must be safe; the automatic cleanup
 	// installed by Func will still run at test end without issue.
-	rewire.Restore(t, os.Getwd)
-	rewire.Restore(t, os.Getwd)
-	rewire.Restore(t, os.Getwd)
+	rewire.RestoreFunc(t, os.Getwd)
+	rewire.RestoreFunc(t, os.Getwd)
+	rewire.RestoreFunc(t, os.Getwd)
 
 	got, err := filepath.Abs("foo")
 	if err != nil {
@@ -70,7 +70,7 @@ func TestRestore_IsIdempotent(t *testing.T) {
 func TestRestore_WithoutPriorFunc(t *testing.T) {
 	// Restore is safe to call even when Func was never invoked — the mock
 	// variable is simply set to its zero value (which it already was).
-	rewire.Restore(t, os.Getwd)
+	rewire.RestoreFunc(t, os.Getwd)
 
 	got, err := filepath.Abs("foo")
 	if err != nil {

@@ -77,7 +77,7 @@ func RewriteSourceOpts(src []byte, funcName string, opts RewriteOptions) ([]byte
 					"rewire: per-instance rewrite requested for %q, but %q is declared as an interface in this file.\n"+
 						"  Interface methods are mocked via rewire.NewMock and a synthesized backing struct,\n"+
 						"  not via rewriter-level method rewriting. This indicates the toolexec scanner failed\n"+
-						"  to recognize a rewire.NewMock[%s] reference and route the InstanceMethod call to\n"+
+						"  to recognize a rewire.NewMock[%s] reference and route the InstanceFunc call to\n"+
 						"  the codegen path — this is a rewire bug, please report it",
 					funcName, typeName, typeName,
 				)

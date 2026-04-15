@@ -65,7 +65,7 @@ func TestGeneric_RestoreSpecificInstantiation(t *testing.T) {
 		return []bool{true}
 	})
 
-	rewire.Restore(t, bar.Map[int, string])
+	rewire.RestoreFunc(t, bar.Map[int, string])
 
 	// [int,string] is back to real
 	got := bar.Map([]int{1}, func(x int) string { return "real" })

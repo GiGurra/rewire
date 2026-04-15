@@ -108,7 +108,7 @@ func For[F any](t *testing.T, target F) *Expectation[F] {
 }
 
 // ForInstance installs an expectation-driven mock scoped to a single
-// receiver, using rewire.InstanceMethod under the hood instead of
+// receiver, using rewire.InstanceFunc under the hood instead of
 // rewire.Func. Works for two related cases:
 //
 //  1. A pointer-receiver method on a concrete type:
@@ -131,7 +131,7 @@ func For[F any](t *testing.T, target F) *Expectation[F] {
 //
 // Differences from For:
 //
-//   - Installation goes through rewire.InstanceMethod, so only calls
+//   - Installation goes through rewire.InstanceFunc, so only calls
 //     whose receiver is `instance` are routed through the dispatcher.
 //     Calls from other instances still see the global mock (if any)
 //     or the real implementation.
@@ -159,7 +159,7 @@ func ForInstance[I any, F any](t *testing.T, instance I, target F) *Expectation[
 	// path checks validity before calling it.
 
 	dispatcher := reflect.MakeFunc(e.fnType, e.dispatch).Interface().(F)
-	rewire.InstanceMethod(t, instance, target, dispatcher)
+	rewire.InstanceFunc(t, instance, target, dispatcher)
 
 	return e
 }

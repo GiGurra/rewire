@@ -765,8 +765,8 @@ func generateRegistration(compileArgs []string, targets mockTargets, instantiati
 					e.importPath+"."+fn, e.alias, realVarName(fn))
 			}
 
-			// Methods referenced by rewire.InstanceMethod /
-			// RestoreInstanceMethod need the per-instance table registered.
+			// Methods referenced by rewire.InstanceFunc /
+			// RestoreInstanceFunc need the per-instance table registered.
 			// The rewriter emitted a Mock_Type_Method_ByInstance sync.Map
 			// at the same package level.
 			//

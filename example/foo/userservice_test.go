@@ -21,7 +21,7 @@ import (
 
 func TestUserService_GetByID_Found(t *testing.T) {
 	repo := rewire.NewMock[bar.Repository[User]](t)
-	rewire.InstanceMethod(t, repo, bar.Repository[User].Get,
+	rewire.InstanceFunc(t, repo, bar.Repository[User].Get,
 		func(r bar.Repository[User], ctx context.Context, id int) (User, error) {
 			if id != 42 {
 				t.Errorf("unexpected id: got %d, want 42", id)
@@ -41,7 +41,7 @@ func TestUserService_GetByID_Found(t *testing.T) {
 
 func TestUserService_GetByID_NotFound(t *testing.T) {
 	repo := rewire.NewMock[bar.Repository[User]](t)
-	rewire.InstanceMethod(t, repo, bar.Repository[User].Get,
+	rewire.InstanceFunc(t, repo, bar.Repository[User].Get,
 		func(r bar.Repository[User], ctx context.Context, id int) (User, error) {
 			return User{}, errors.New("not found")
 		})
@@ -55,7 +55,7 @@ func TestUserService_GetByID_NotFound(t *testing.T) {
 
 func TestUserService_AllNames(t *testing.T) {
 	repo := rewire.NewMock[bar.Repository[User]](t)
-	rewire.InstanceMethod(t, repo, bar.Repository[User].List,
+	rewire.InstanceFunc(t, repo, bar.Repository[User].List,
 		func(r bar.Repository[User], ctx context.Context) ([]User, error) {
 			return []User{
 				{ID: 1, Name: "Alice"},
@@ -82,7 +82,7 @@ func TestUserService_AllNames(t *testing.T) {
 
 func TestUserService_AllNames_Error(t *testing.T) {
 	repo := rewire.NewMock[bar.Repository[User]](t)
-	rewire.InstanceMethod(t, repo, bar.Repository[User].List,
+	rewire.InstanceFunc(t, repo, bar.Repository[User].List,
 		func(r bar.Repository[User], ctx context.Context) ([]User, error) {
 			return nil, errors.New("db down")
 		})
@@ -101,11 +101,11 @@ func TestUserService_Rename_GetThenSave(t *testing.T) {
 	repo := rewire.NewMock[bar.Repository[User]](t)
 
 	var savedUser User
-	rewire.InstanceMethod(t, repo, bar.Repository[User].Get,
+	rewire.InstanceFunc(t, repo, bar.Repository[User].Get,
 		func(r bar.Repository[User], ctx context.Context, id int) (User, error) {
 			return User{ID: id, Name: "OldName"}, nil
 		})
-	rewire.InstanceMethod(t, repo, bar.Repository[User].Save,
+	rewire.InstanceFunc(t, repo, bar.Repository[User].Save,
 		func(r bar.Repository[User], ctx context.Context, item User) error {
 			savedUser = item
 			return nil
@@ -127,11 +127,11 @@ func TestUserService_Rename_GetFails(t *testing.T) {
 	repo := rewire.NewMock[bar.Repository[User]](t)
 
 	saveCalled := false
-	rewire.InstanceMethod(t, repo, bar.Repository[User].Get,
+	rewire.InstanceFunc(t, repo, bar.Repository[User].Get,
 		func(r bar.Repository[User], ctx context.Context, id int) (User, error) {
 			return User{}, errors.New("not found")
 		})
-	rewire.InstanceMethod(t, repo, bar.Repository[User].Save,
+	rewire.InstanceFunc(t, repo, bar.Repository[User].Save,
 		func(r bar.Repository[User], ctx context.Context, item User) error {
 			saveCalled = true
 			return nil
@@ -150,11 +150,11 @@ func TestUserService_DeleteIfExists_Exists(t *testing.T) {
 	repo := rewire.NewMock[bar.Repository[User]](t)
 
 	var deletedID int
-	rewire.InstanceMethod(t, repo, bar.Repository[User].Get,
+	rewire.InstanceFunc(t, repo, bar.Repository[User].Get,
 		func(r bar.Repository[User], ctx context.Context, id int) (User, error) {
 			return User{ID: id, Name: "Existing"}, nil
 		})
-	rewire.InstanceMethod(t, repo, bar.Repository[User].Delete,
+	rewire.InstanceFunc(t, repo, bar.Repository[User].Delete,
 		func(r bar.Repository[User], ctx context.Context, id int) error {
 			deletedID = id
 			return nil
@@ -177,11 +177,11 @@ func TestUserService_DeleteIfExists_NotFound(t *testing.T) {
 	repo := rewire.NewMock[bar.Repository[User]](t)
 
 	deleteCalled := false
-	rewire.InstanceMethod(t, repo, bar.Repository[User].Get,
+	rewire.InstanceFunc(t, repo, bar.Repository[User].Get,
 		func(r bar.Repository[User], ctx context.Context, id int) (User, error) {
 			return User{}, errors.New("not found")
 		})
-	rewire.InstanceMethod(t, repo, bar.Repository[User].Delete,
+	rewire.InstanceFunc(t, repo, bar.Repository[User].Delete,
 		func(r bar.Repository[User], ctx context.Context, id int) error {
 			deleteCalled = true
 			return nil
@@ -207,11 +207,11 @@ func TestUserService_TwoServicesIsolated(t *testing.T) {
 	repo1 := rewire.NewMock[bar.Repository[User]](t)
 	repo2 := rewire.NewMock[bar.Repository[User]](t)
 
-	rewire.InstanceMethod(t, repo1, bar.Repository[User].Get,
+	rewire.InstanceFunc(t, repo1, bar.Repository[User].Get,
 		func(r bar.Repository[User], ctx context.Context, id int) (User, error) {
 			return User{ID: id, Name: "FromRepo1"}, nil
 		})
-	rewire.InstanceMethod(t, repo2, bar.Repository[User].Get,
+	rewire.InstanceFunc(t, repo2, bar.Repository[User].Get,
 		func(r bar.Repository[User], ctx context.Context, id int) (User, error) {
 			return User{ID: id, Name: "FromRepo2"}, nil
 		})

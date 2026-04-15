@@ -72,13 +72,13 @@ func TestGreetWith_MockedMethod(t *testing.T) {
 
 Both pointer (`(*Type).Method`) and value (`Type.Method`) receivers work. The replacement function takes the receiver as its first parameter.
 
-For **per-instance** scoping — mock one specific receiver while other instances run the real method body — use `rewire.InstanceMethod`:
+For **per-instance** scoping — mock one specific receiver while other instances run the real method body — use `rewire.InstanceFunc`:
 
 ```go
 s1 := &bar.Server{Name: "primary"}
 s2 := &bar.Server{Name: "secondary"}
 
-rewire.InstanceMethod(t, s1, (*bar.Server).Handle, func(s *bar.Server, req string) string {
+rewire.InstanceFunc(t, s1, (*bar.Server).Handle, func(s *bar.Server, req string) string {
     return "primary-mock: " + req
 })
 
@@ -96,7 +96,7 @@ Rewire synthesizes the backing struct for an interface at compile time. No `go:g
 func TestService_GreetingFlow(t *testing.T) {
     greeter := rewire.NewMock[bar.GreeterIface](t)
 
-    rewire.InstanceMethod(t, greeter, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
+    rewire.InstanceFunc(t, greeter, bar.GreeterIface.Greet, func(g bar.GreeterIface, name string) string {
         return "mocked: " + name
     })
 
@@ -108,7 +108,7 @@ func TestService_GreetingFlow(t *testing.T) {
 
 The toolexec wrapper scans test files for `rewire.NewMock[X]` references, parses the interface's source, and emits a concrete backing struct into the test package's compile args. You don't see the generated code, don't commit it, and don't regenerate it when the interface changes.
 
-Two mocks of the same interface are scoped independently via the same per-instance dispatch that backs `rewire.InstanceMethod`. Unstubbed methods return zero values. `rewire.Restore(t, mock)` clears every stub bound to a mock.
+Two mocks of the same interface are scoped independently via the same per-instance dispatch that backs `rewire.InstanceFunc`. Unstubbed methods return zero values. `rewire.RestoreInstance(t, mock)` clears every stub bound to a mock.
 
 See [Interface Mocks](interface-mocks.md) for the full feature set, including generic interfaces.
 

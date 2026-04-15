@@ -8,11 +8,11 @@ import (
 )
 
 // Two instances, per-instance mock on one — the other runs the real body.
-func TestInstanceMethod_ScopedToOneInstance(t *testing.T) {
+func TestInstanceFunc_ScopedToOneInstance(t *testing.T) {
 	g1 := &bar.Greeter{Prefix: "Hi"}
 	g2 := &bar.Greeter{Prefix: "Hello"}
 
-	rewire.InstanceMethod(t, g1, (*bar.Greeter).Greet, func(g *bar.Greeter, name string) string {
+	rewire.InstanceFunc(t, g1, (*bar.Greeter).Greet, func(g *bar.Greeter, name string) string {
 		return "g1-mock: " + name
 	})
 
@@ -25,7 +25,7 @@ func TestInstanceMethod_ScopedToOneInstance(t *testing.T) {
 }
 
 // Per-instance and global mocks combined: per-instance wins, then global, then real.
-func TestInstanceMethod_OverridesGlobal(t *testing.T) {
+func TestInstanceFunc_OverridesGlobal(t *testing.T) {
 	g1 := &bar.Greeter{Prefix: "Hi"}
 	g2 := &bar.Greeter{Prefix: "Hello"}
 	g3 := &bar.Greeter{Prefix: "Hej"}
@@ -33,7 +33,7 @@ func TestInstanceMethod_OverridesGlobal(t *testing.T) {
 	rewire.Func(t, (*bar.Greeter).Greet, func(g *bar.Greeter, name string) string {
 		return "global: " + name
 	})
-	rewire.InstanceMethod(t, g1, (*bar.Greeter).Greet, func(g *bar.Greeter, name string) string {
+	rewire.InstanceFunc(t, g1, (*bar.Greeter).Greet, func(g *bar.Greeter, name string) string {
 		return "g1-mock: " + name
 	})
 
@@ -49,14 +49,14 @@ func TestInstanceMethod_OverridesGlobal(t *testing.T) {
 }
 
 // Multiple methods on the same instance via per-instance mocks.
-func TestInstanceMethod_MultipleMethodsOneInstance(t *testing.T) {
+func TestInstanceFunc_MultipleMethodsOneInstance(t *testing.T) {
 	g := &bar.Greeter{Prefix: "Hi"}
 	other := &bar.Greeter{Prefix: "Hello"}
 
-	rewire.InstanceMethod(t, g, (*bar.Greeter).Greet, func(g *bar.Greeter, name string) string {
+	rewire.InstanceFunc(t, g, (*bar.Greeter).Greet, func(g *bar.Greeter, name string) string {
 		return "g-greet-mock: " + name
 	})
-	rewire.InstanceMethod(t, g, (*bar.Greeter).Farewell, func(g *bar.Greeter, name string) string {
+	rewire.InstanceFunc(t, g, (*bar.Greeter).Farewell, func(g *bar.Greeter, name string) string {
 		return "g-farewell-mock: " + name
 	})
 
@@ -75,15 +75,15 @@ func TestInstanceMethod_MultipleMethodsOneInstance(t *testing.T) {
 	}
 }
 
-// rewire.Restore(t, instance) clears every per-instance mock on the instance
-// at once, leaving other instances untouched.
-func TestInstanceMethod_RestoreInstanceClearsAll(t *testing.T) {
+// rewire.RestoreInstance(t, instance) clears every per-instance mock on the
+// instance at once, leaving other instances untouched.
+func TestInstanceFunc_RestoreInstanceClearsAll(t *testing.T) {
 	g := &bar.Greeter{Prefix: "Hi"}
 
-	rewire.InstanceMethod(t, g, (*bar.Greeter).Greet, func(g *bar.Greeter, name string) string {
+	rewire.InstanceFunc(t, g, (*bar.Greeter).Greet, func(g *bar.Greeter, name string) string {
 		return "g-greet-mock: " + name
 	})
-	rewire.InstanceMethod(t, g, (*bar.Greeter).Farewell, func(g *bar.Greeter, name string) string {
+	rewire.InstanceFunc(t, g, (*bar.Greeter).Farewell, func(g *bar.Greeter, name string) string {
 		return "g-farewell-mock: " + name
 	})
 
@@ -95,8 +95,8 @@ func TestInstanceMethod_RestoreInstanceClearsAll(t *testing.T) {
 		t.Errorf("pre-restore g.Farewell: got %q", got)
 	}
 
-	// Restore(t, instance) clears per-instance scope for ALL methods on g.
-	rewire.Restore(t, g)
+	// RestoreInstance(t, instance) clears per-instance scope for ALL methods on g.
+	rewire.RestoreInstance(t, g)
 
 	if got := g.Greet("Alice"); got != "Hi, Alice!" {
 		t.Errorf("post-restore g.Greet: expected real body, got %q", got)
@@ -106,19 +106,19 @@ func TestInstanceMethod_RestoreInstanceClearsAll(t *testing.T) {
 	}
 }
 
-// rewire.RestoreInstanceMethod clears one specific per-instance entry,
+// rewire.RestoreInstanceFunc clears one specific per-instance entry,
 // leaving other methods on the same instance intact.
-func TestInstanceMethod_RestoreInstanceMethodClearsOne(t *testing.T) {
+func TestInstanceFunc_RestoreInstanceFuncClearsOne(t *testing.T) {
 	g := &bar.Greeter{Prefix: "Hi"}
 
-	rewire.InstanceMethod(t, g, (*bar.Greeter).Greet, func(g *bar.Greeter, name string) string {
+	rewire.InstanceFunc(t, g, (*bar.Greeter).Greet, func(g *bar.Greeter, name string) string {
 		return "g-greet-mock: " + name
 	})
-	rewire.InstanceMethod(t, g, (*bar.Greeter).Farewell, func(g *bar.Greeter, name string) string {
+	rewire.InstanceFunc(t, g, (*bar.Greeter).Farewell, func(g *bar.Greeter, name string) string {
 		return "g-farewell-mock: " + name
 	})
 
-	rewire.RestoreInstanceMethod(t, g, (*bar.Greeter).Greet)
+	rewire.RestoreInstanceFunc(t, g, (*bar.Greeter).Greet)
 
 	if got := g.Greet("Alice"); got != "Hi, Alice!" {
 		t.Errorf("g.Greet should be restored: got %q", got)
@@ -131,13 +131,13 @@ func TestInstanceMethod_RestoreInstanceMethodClearsOne(t *testing.T) {
 // Per-instance mocking on a generic method. (*bar.Container[int]).Add is
 // scoped to one instance — a different *Container[int] still runs the real
 // append, and a *Container[string] is entirely untouched.
-func TestInstanceMethod_GenericMethod(t *testing.T) {
+func TestInstanceFunc_GenericMethod(t *testing.T) {
 	c1 := &bar.Container[int]{}
 	c2 := &bar.Container[int]{}
 	cs := &bar.Container[string]{}
 
 	var c1Added []int
-	rewire.InstanceMethod(t, c1, (*bar.Container[int]).Add, func(c *bar.Container[int], v int) {
+	rewire.InstanceFunc(t, c1, (*bar.Container[int]).Add, func(c *bar.Container[int], v int) {
 		c1Added = append(c1Added, v)
 	})
 
@@ -164,14 +164,14 @@ func TestInstanceMethod_GenericMethod(t *testing.T) {
 // per-instance keys — interface equality compares both dynamic type and
 // value. This test is mostly illustrative; in practice two allocations
 // never share an address.
-func TestInstanceMethod_GenericInstantiationsScopedIndependently(t *testing.T) {
+func TestInstanceFunc_GenericInstantiationsScopedIndependently(t *testing.T) {
 	ci := &bar.Container[int]{}
 	cs := &bar.Container[string]{}
 
-	rewire.InstanceMethod(t, ci, (*bar.Container[int]).Add, func(c *bar.Container[int], v int) {
+	rewire.InstanceFunc(t, ci, (*bar.Container[int]).Add, func(c *bar.Container[int], v int) {
 		// swallow
 	})
-	rewire.InstanceMethod(t, cs, (*bar.Container[string]).Add, func(c *bar.Container[string], v string) {
+	rewire.InstanceFunc(t, cs, (*bar.Container[string]).Add, func(c *bar.Container[string], v string) {
 		// swallow
 	})
 

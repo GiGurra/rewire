@@ -29,10 +29,10 @@ type mockTargets map[string][]string
 type genericInstantiations map[string]map[string][][]string
 
 // byInstanceTargets identifies (importPath, targetName) pairs that are
-// referenced by at least one rewire.InstanceMethod or
-// rewire.RestoreInstanceMethod call anywhere in the module. The rewriter
+// referenced by at least one rewire.InstanceFunc or
+// rewire.RestoreInstanceFunc call anywhere in the module. The rewriter
 // emits an extra per-instance dispatch path for these, and the codegen
-// emits a RegisterByInstance call so that rewire.InstanceMethod can
+// emits a RegisterByInstance call so that rewire.InstanceFunc can
 // resolve the per-instance sync.Map.
 //
 // Shape: importPath -> targetName -> true.
@@ -93,7 +93,7 @@ type scanCache struct {
 }
 
 // loadOrScanMockTargets returns the set of functions that need to be mocked,
-// as declared by rewire.{Func,Real,Restore,InstanceMethod,RestoreInstanceMethod,NewMock}
+// as declared by rewire.{Func,Real,RestoreFunc,InstanceFunc,RestoreInstanceFunc,NewMock}
 // calls in test files across the module, along with the specific
 // type-argument combinations referenced for any generic targets, the
 // subset of targets that need a per-instance dispatch path, and the set
@@ -198,8 +198,8 @@ func writeScanCacheFile(path string, cache scanCache) {
 	_ = os.Rename(tmp, path)
 }
 
-// scanAllTestFiles walks the module and finds all rewire.{Func,Real,Restore,
-// InstanceMethod,RestoreInstanceMethod,NewMock} calls in test files.
+// scanAllTestFiles walks the module and finds all rewire.{Func,Real,RestoreFunc,
+// InstanceFunc,RestoreInstanceFunc,NewMock} calls in test files.
 //
 // After the walk, interface-typed targets are filtered out of
 // targets/byInstance for the interface's declaring package — those
@@ -256,7 +256,7 @@ func scanAllTestFiles(moduleRoot string) (mockTargets, genericInstantiations, by
 		return nil
 	})
 
-	// Filter out InstanceMethod / RestoreInstanceMethod targets whose
+	// Filter out InstanceFunc / RestoreInstanceFunc targets whose
 	// receiver type is a mocked interface. Those targets don't get
 	// rewritten in the interface's declaring package — the per-instance
 	// dispatch table is emitted into the test package instead, by the
@@ -372,15 +372,18 @@ func scanFileForMockCalls(path string) (mockTargets, genericInstantiations, byIn
 		return nil, nil, nil, nil
 	}
 
-	// Walk AST looking for rewire.{Func,Real,Restore,InstanceMethod,
-	// RestoreInstanceMethod,NewMock} calls.
+	// Walk AST looking for rewire.{Func,Real,RestoreFunc,InstanceFunc,
+	// RestoreInstanceFunc,NewMock} calls.
 	//
-	// Func/Real/Restore take the target function as their second argument
+	// Func/Real/RestoreFunc take the target function as their second argument
 	// (index 1), after t.
 	//
-	// InstanceMethod/RestoreInstanceMethod take an instance as their second
+	// InstanceFunc/RestoreInstanceFunc take an instance as their second
 	// argument (index 1) and the target as their third (index 2) — and they
 	// additionally flag the target as needing per-instance emission.
+	//
+	// RestoreInstance takes only an instance and contributes no targets,
+	// so the scanner skips it.
 	//
 	// NewMock[I](...) takes its type argument as an IndexExpr wrapping
 	// the rewire.NewMock selector — no positional target argument.
@@ -439,11 +442,13 @@ func scanFileForMockCalls(path string) (mockTargets, genericInstantiations, byIn
 		var targetArgIdx int
 		var needsByInstance bool
 		switch sel.Sel.Name {
-		case "Func", "Real", "Restore":
+		case "Func", "Real", "RestoreFunc":
 			targetArgIdx = 1
-		case "InstanceMethod", "RestoreInstanceMethod":
+		case "InstanceFunc", "RestoreInstanceFunc":
 			targetArgIdx = 2
 			needsByInstance = true
+		// RestoreInstance takes only an instance, no function
+		// target — it contributes nothing to the target set.
 		default:
 			return true
 		}
@@ -585,7 +590,7 @@ func stripTypeArgs(expr ast.Expr, fset *token.FileSet) (ast.Expr, []string) {
 }
 
 // extractMockTarget parses the second argument of a rewire.Func /
-// rewire.Real / rewire.Restore call into an import path, a canonical
+// rewire.Real / rewire.RestoreFunc call into an import path, a canonical
 // target name, and (for generic references) the list of type-argument
 // source strings. Returns an empty importPath when the expression
 // doesn't match any recognized form.
