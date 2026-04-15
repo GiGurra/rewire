@@ -159,3 +159,17 @@ func TestReal_SpyCountsRealCalls(t *testing.T) {
 		t.Errorf("expected 5 delegated calls to real os.Getwd, got %d", realCalls)
 	}
 }
+
+func TestHostname_Mocked(t *testing.T) {
+	rewire.Func(t, os.Hostname, func() (string, error) {
+		return "mocked-host", nil
+	})
+
+	got, err := os.Hostname()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "mocked-host" {
+		t.Errorf("expected mocked-host, got %s", got)
+	}
+}

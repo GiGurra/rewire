@@ -93,6 +93,19 @@ func Run(args []string) int {
 		return execToolReplace(tool, toolArgs)
 	}
 
+	// For test compilations: check if the mock target set changed
+	// since the last build. When it has, the build cache contains
+	// stale .a files for target packages (missing the new mock vars).
+	// Rebuilding just those packages isn't enough — the linker
+	// verifies fingerprints across the dependency tree — so we clear
+	// the cache and ask the user to re-run.
+	if isTest {
+		if msg := checkAndInvalidateStaleTargets(moduleRoot, targets); msg != "" {
+			fmt.Fprintln(os.Stderr, msg)
+			return 1
+		}
+	}
+
 	rewrittenArgs, cleanup, err := rewriteCompileArgs(toolArgs, pkgPath, funcsToMock, pkgByInstance, isTest, targets, instantiations, byInstance)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "rewire: rewrite failed for %s: %v\n", pkgPath, err)
