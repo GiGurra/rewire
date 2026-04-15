@@ -7,71 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 )
-
-// cacheFilePattern matches Go build cache data files: 64 hex chars + "-d".
-var cacheFilePattern = regexp.MustCompile(`^[0-9a-f]{64}-d$`)
-
-// isSafeCacheDelete validates that path is safe to delete: it must be
-// a Go build cache data file inside $GOCACHE and nothing else.
-//
-// Guards:
-//  1. path is non-empty
-//  2. path is absolute
-//  3. GOCACHE is non-empty
-//  4. GOCACHE is absolute
-//  5. GOCACHE is not "/" or $HOME or "."
-//  6. path is strictly under GOCACHE (not equal to it)
-//  7. filename matches the <64-hex-chars>-d pattern
-func isSafeCacheDelete(path string) bool {
-	if path == "" {
-		return false
-	}
-	if !filepath.IsAbs(path) {
-		return false
-	}
-
-	goCache := os.Getenv("GOCACHE")
-	if goCache == "" {
-		// GOCACHE not set — resolve via `go env` would be expensive,
-		// and if it's not set we can't validate. Bail out.
-		return false
-	}
-	if !filepath.IsAbs(goCache) {
-		return false
-	}
-
-	// Reject dangerous GOCACHE values.
-	cleanCache := filepath.Clean(goCache)
-	if cleanCache == "/" || cleanCache == "." {
-		return false
-	}
-	home := os.Getenv("HOME")
-	if home != "" && cleanCache == filepath.Clean(home) {
-		return false
-	}
-
-	// path must be strictly inside GOCACHE.
-	cleanPath := filepath.Clean(path)
-	rel, err := filepath.Rel(cleanCache, cleanPath)
-	if err != nil {
-		return false
-	}
-	// Rel returns ".." prefixed paths if cleanPath is outside cleanCache.
-	if rel == "." || strings.HasPrefix(rel, "..") {
-		return false
-	}
-
-	// Filename must match the Go cache data file pattern.
-	if !cacheFilePattern.MatchString(filepath.Base(cleanPath)) {
-		return false
-	}
-
-	return true
-}
 
 // targetsHash computes a deterministic hash of the mock target set.
 // Only the Targets map (importPath → []funcName) is hashed, since
@@ -134,9 +72,8 @@ func writePersistentHash(path, hash string) {
 	_ = os.Rename(tmp, path)
 }
 
-// invalidateAndRebuildStaleTargets compares the current scan targets
-// against the persisted hash. If the target set changed, it deletes
-// stale cache entries for affected packages and rebuilds them through
+// checkAndInvalidateStaleTargets compares the current scan targets
+// against the persisted hash and detects when mock
 // targets changed since the last build. Rebuilding individual packages
 // isn't enough because the linker verifies fingerprints — rewriting `os`
 // changes its fingerprint, which mismatches with `testing` (compiled
@@ -207,15 +144,4 @@ func checkAndInvalidateStaleTargets(moduleRoot string, targets mockTargets) stri
 		strings.Join(changed, ", "))
 }
 
-// resolveExportPath runs `go list -export` to find the cached .a path
-// for a package. Returns "" on failure.
-func resolveExportPath(importPath string, env []string) string {
-	cmd := exec.Command("go", "list", "-export", "-f", "{{.Export}}", importPath)
-	cmd.Env = env
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
-}
 
