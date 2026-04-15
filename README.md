@@ -293,7 +293,7 @@ GOCACHE="$HOME/.cache/rewire-test" go clean -cache
 export GOFLAGS="-toolexec=rewire"
 ```
 
-Simpler, but `go build` now also runs through the rewire toolexec. The overhead is tiny (a nil check per mocked function) but the split-cache setup is cleaner for day-to-day use.
+Simpler, but `go build` now also runs through the rewire toolexec. The overhead is usually tiny (a nil check per mocked function) but the split-cache setup is cleaner for day-to-day use. The increase in compilation times is measurable.
 
 </details>
 
