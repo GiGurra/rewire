@@ -304,6 +304,7 @@ Simpler, but `go build` now also runs through the rewire toolexec. The overhead 
 - **Compiler intrinsics** — `math.Abs`, `math.Sqrt`, `math.Floor` and friends are replaced by CPU instructions at the call site, bypassing any wrapper. Rewire detects these and fails with a clear error. Non-intrinsic alternatives (`math.Pow`, for example) work fine.
 - **Bodyless functions** — functions implemented in assembly have no Go source to rewrite. Detected and rejected at compile time.
 - **Parallel mocks on the same target** — two `t.Parallel()` tests that mock the same function with different replacements will race on the package-level mock variable. Rewire is single-test-at-a-time per target.
+- **Adding new mock targets requires a re-run** — when you mock a function for the first time (e.g., adding `rewire.Func(t, os.Hostname, ...)` to a test), the cached package lacks the new mock variable. Rewire detects this automatically, clears the build cache, and asks you to re-run. The second run succeeds and subsequent runs are fully cached. This only triggers when the set of mocked functions changes, not during normal TDD.
 
 </details>
 

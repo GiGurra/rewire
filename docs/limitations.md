@@ -23,9 +23,19 @@ Two parallel tests mocking **different** functions is fine — there's no conten
 
 Functions implemented in assembly (no Go body) cannot be rewritten. These are typically low-level runtime or math functions. Rewire will fail with an error if you try to mock one.
 
-## Build cache considerations
+## Build cache and new mock targets
 
-Go's build cache keys on compilation inputs including the toolexec binary. If you change rewire versions, you may need to clean the cache:
+When you add a new `rewire.Func` target for a package that was already cached (e.g., adding `rewire.Func(t, os.Hostname, ...)` when only `os.Getwd` was mocked before), the cached `.a` file for that package lacks the new `Mock_`/`Real_` variables. Rewire **detects this automatically** and clears the build cache, printing:
+
+```
+rewire: mock target set changed (affected packages: os, strings, ...).
+    The build cache has been cleared automatically.
+    Please re-run your test command — the next run will succeed.
+```
+
+**Why a re-run is needed:** rewriting `os` changes its linker fingerprint. Every package compiled against the old `os` (including `testing`, `fmt`, etc.) embeds that fingerprint. The linker rejects mismatches, so the entire transitive dependency tree must be rebuilt — equivalent to clearing the cache. This only happens when the set of mocked functions changes, not during normal TDD.
+
+If you change rewire versions, you may also need to clean the cache manually:
 
 ```bash
 go clean -cache
