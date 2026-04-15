@@ -100,6 +100,7 @@ func TestAbs(t *testing.T) {
 // warm cache → add new mock target → rewire detects + clears cache →
 // re-run succeeds.
 func TestNewMockTargetAutoInvalidatesCache(t *testing.T) {
+	ensureRewireInstalled(t)
 	tmpDir := t.TempDir()
 	testCache := filepath.Join(tmpDir, "gocache")
 	pkgDir := filepath.Join(tmpDir, "pkg")
@@ -223,6 +224,21 @@ func TestHostname(t *testing.T) {
 	// Step 5: one more run — should be cached and still pass.
 	if _, err := run("cached"); err != nil {
 		t.Fatalf("cached run failed: %v", err)
+	}
+}
+
+// ensureRewireInstalled builds and installs the rewire binary if it
+// isn't already in $PATH. Integration tests that shell out to
+// `go test -toolexec=rewire` need the binary available.
+func ensureRewireInstalled(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("rewire"); err == nil {
+		return // already installed
+	}
+	cmd := exec.Command("go", "install", "../../cmd/rewire/")
+	cmd.Env = envWithoutGOFLAGS()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to install rewire: %v\n%s", err, out)
 	}
 }
 
