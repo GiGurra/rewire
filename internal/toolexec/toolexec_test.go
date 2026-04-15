@@ -227,6 +227,165 @@ func TestHostname(t *testing.T) {
 	}
 }
 
+// TestStaleTargetDetectionSurvivesTmpdirCleanup simulates macOS
+// /var/folders cleanup (or any TMPDIR purge) wiping the persistent
+// targets-hash file while GOCACHE survives. The stale-target detector
+// must still catch the subsequent target-set change — otherwise the
+// cache silently holds stale .a files and the compile fails with
+// "undefined: _rewire_<pkg>.Mock_<Fn>".
+func TestStaleTargetDetectionSurvivesTmpdirCleanup(t *testing.T) {
+	ensureRewireInstalled(t)
+	tmpDir := t.TempDir()
+	testCache := filepath.Join(tmpDir, "gocache")
+	testTmp := filepath.Join(tmpDir, "tmpdir")
+	pkgDir := filepath.Join(tmpDir, "pkg")
+
+	if err := os.MkdirAll(pkgDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(testTmp, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte(
+		"module testmod\n\ngo 1.21\n\nrequire github.com/GiGurra/rewire v0.0.0\n\n"+
+			"replace github.com/GiGurra/rewire => "+mustAbs("../..")+"\n",
+	), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(pkgDir, "pkg.go"), []byte(`package pkg
+
+import "os"
+
+func Dir() string  { d, _ := os.Getwd(); return d }
+func Host() string { h, _ := os.Hostname(); return h }
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	testV1 := []byte(`package pkg
+
+import (
+	"os"
+	"testing"
+	"github.com/GiGurra/rewire/pkg/rewire"
+)
+
+func TestGetwd(t *testing.T) {
+	rewire.Func(t, os.Getwd, func() (string, error) { return "/mock", nil })
+	if got := Dir(); got != "/mock" {
+		t.Fatalf("got %q, want /mock", got)
+	}
+}
+`)
+	if err := os.WriteFile(filepath.Join(pkgDir, "pkg_test.go"), testV1, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Isolated GOCACHE + isolated TMPDIR so we can delete the
+	// persistent hash without touching the host's TMPDIR.
+	var subEnv []string
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "GOFLAGS=") || strings.HasPrefix(e, "TMPDIR=") {
+			continue
+		}
+		subEnv = append(subEnv, e)
+	}
+	subEnv = append(subEnv, "GOCACHE="+testCache, "TMPDIR="+testTmp)
+
+	tidy := exec.Command("go", "mod", "tidy")
+	tidy.Dir = tmpDir
+	tidy.Env = subEnv
+	if out, err := tidy.CombinedOutput(); err != nil {
+		t.Fatalf("go mod tidy: %v\n%s", err, out)
+	}
+
+	run := func(label string) (string, error) {
+		cmd := exec.Command("go", "test", "-toolexec=rewire", "-count=1", "./pkg/")
+		cmd.Dir = tmpDir
+		cmd.Env = subEnv
+		out, err := cmd.CombinedOutput()
+		t.Logf("[%s] output:\n%s", label, out)
+		return string(out), err
+	}
+
+	// Step 1: warm the cache with v1 targets.
+	if _, err := run("initial"); err != nil {
+		t.Fatalf("initial run failed: %v", err)
+	}
+
+	// Step 2: simulate TMPDIR cleanup (e.g. macOS reboot purge of
+	// /var/folders). Wipe every rewire-* entry the subprocess created.
+	entries, err := os.ReadDir(testTmp)
+	if err != nil {
+		t.Fatalf("read testTmp: %v", err)
+	}
+	wipedAny := false
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "rewire-") {
+			if err := os.RemoveAll(filepath.Join(testTmp, e.Name())); err != nil {
+				t.Fatalf("remove %s: %v", e.Name(), err)
+			}
+			wipedAny = true
+		}
+	}
+	if !wipedAny {
+		t.Fatal("expected at least one rewire-* entry in the isolated TMPDIR; " +
+			"either the subprocess didn't honor TMPDIR or rewire no longer " +
+			"writes there (update this test to wipe wherever the hash lives)")
+	}
+
+	// Step 3: add a new mock target. GOCACHE still has v1 strings/os
+	// artifacts, but the persistent hash is gone.
+	testV2 := []byte(`package pkg
+
+import (
+	"os"
+	"testing"
+	"github.com/GiGurra/rewire/pkg/rewire"
+)
+
+func TestGetwd(t *testing.T) {
+	rewire.Func(t, os.Getwd, func() (string, error) { return "/mock", nil })
+	if got := Dir(); got != "/mock" {
+		t.Fatalf("got %q, want /mock", got)
+	}
+}
+
+func TestHostname(t *testing.T) {
+	rewire.Func(t, os.Hostname, func() (string, error) { return "mockhost", nil })
+	if got := Host(); got != "mockhost" {
+		t.Fatalf("got %q, want mockhost", got)
+	}
+}
+`)
+	if err := os.WriteFile(filepath.Join(pkgDir, "pkg_test.go"), testV2, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Step 4: with the hash gone but GOCACHE still holding v1 .a
+	// files, the next run must detect the stale state. Expected
+	// outcome: auto-invalidation fires with the "mock target set
+	// changed" message (exit 1), not a raw "undefined:
+	// _rewire_os.Mock_Hostname" compile error.
+	out, err := run("after-tmpdir-wipe")
+	if err == nil {
+		t.Fatal("expected failure after adding new mock target post-TMPDIR wipe, but test passed")
+	}
+	if strings.Contains(out, "undefined: _rewire_") {
+		t.Fatalf("stale-target detection missed the change — got a raw compile error instead of auto-invalidation:\n%s", out)
+	}
+	if !strings.Contains(out, "mock target set changed") {
+		t.Fatalf("expected 'mock target set changed' message, got:\n%s", out)
+	}
+
+	// Step 5: re-run — cache was cleared, should rebuild and pass.
+	if _, err := run("re-run"); err != nil {
+		t.Fatalf("re-run after cache clear failed: %v", err)
+	}
+}
+
 // ensureRewireInstalled builds and installs the rewire binary if it
 // isn't already in $PATH. Integration tests that shell out to
 // `go test -toolexec=rewire` need the binary available.
