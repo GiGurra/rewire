@@ -51,21 +51,36 @@ func TestAbs(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Build an environment for subprocesses that:
+	// 1. Strips GOFLAGS so the parent's -toolexec=rewire doesn't leak
+	//    into go mod tidy or double-apply during go test.
+	// 2. Uses an isolated GOCACHE so this test doesn't contaminate the
+	//    caller's cache. Without isolation, the subprocess compiles the
+	//    entire stdlib through toolexec with the *temp dir* as the module
+	//    root — the scan finds no mock targets and stdlib packages are
+	//    cached without mock vars, breaking subsequent test runs that
+	//    share the same GOCACHE.
+	testCache := filepath.Join(tmpDir, "gocache")
+	var subEnv []string
+	for _, e := range os.Environ() {
+		if !strings.HasPrefix(e, "GOFLAGS=") {
+			subEnv = append(subEnv, e)
+		}
+	}
+	subEnv = append(subEnv, "GOCACHE="+testCache)
+
 	// Tidy the module
 	tidy := exec.Command("go", "mod", "tidy")
 	tidy.Dir = tmpDir
+	tidy.Env = subEnv
 	if out, err := tidy.CombinedOutput(); err != nil {
 		t.Fatalf("go mod tidy failed: %v\n%s", err, out)
 	}
 
-	// Clear build cache to ensure math is recompiled through toolexec
-	clean := exec.Command("go", "clean", "-cache")
-	clean.Dir = tmpDir
-	_ = clean.Run()
-
 	// Run go test with toolexec — should fail with a clear error
 	cmd := exec.Command("go", "test", "-toolexec=rewire", "-count=1", "./pkg/")
 	cmd.Dir = tmpDir
+	cmd.Env = subEnv
 	out, err := cmd.CombinedOutput()
 	output := string(out)
 

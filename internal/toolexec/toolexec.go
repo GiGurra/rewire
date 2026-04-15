@@ -51,6 +51,11 @@ func Run(args []string) int {
 		return execToolReplace(tool, toolArgs)
 	}
 
+	if profileEnabled.Load() {
+		cwd, _ := os.Getwd()
+		fmt.Fprintf(os.Stderr, "rewire-debug pkg=%s cwd=%s moduleRoot=%s\n", pkgPath, cwd, moduleRoot)
+	}
+
 	defer profileStage("compile-wrap", pkgPath)()
 
 	// Load the set of functions to mock (scanned from test files)
@@ -61,6 +66,10 @@ func Run(args []string) int {
 	funcsToMock := targets[pkgPath]
 	pkgByInstance := byInstance[pkgPath]
 	isTest := hasTestFiles(toolArgs)
+
+	if profileEnabled.Load() && (pkgPath == "strings" || pkgPath == "os" || pkgPath == "math") {
+		fmt.Fprintf(os.Stderr, "rewire-debug pkg=%s funcsToMock=%v isTest=%v\n", pkgPath, funcsToMock, isTest)
+	}
 
 	// Reject intrinsic functions early
 	for _, fn := range funcsToMock {
