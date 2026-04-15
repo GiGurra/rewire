@@ -1,50 +1,6 @@
 # Roadmap
 
-This page tracks rewire's shipped features, what's actively planned, and gaps we're deliberately not tackling. "Shipped" is the majority — rewire has moved quickly, so most of the items that used to live here have landed.
-
-## Shipped
-
-### Function mocking (toolexec)
-
-Replace any function — your own, third-party, stdlib — with a closure at test time. No interfaces, no DI, no unsafe runtime patching. Works for generic functions on a per-instantiation basis. See [Function Mocking](function-mocking.md).
-
-### Method mocking (global)
-
-Mock struct methods via Go method expressions (`(*Type).Method` or `Type.Method`). The replacement takes the receiver as its first parameter. Applies to every instance of the type. See [Method Mocking](method-mocking.md).
-
-### Per-instance method mocks
-
-`rewire.InstanceFunc` scopes a method replacement to one specific receiver, leaving other instances to run the real method body (or a global mock, if one is set). Works on non-generic and generic types. Backed by a per-method `_ByInstance sync.Map` the rewriter emits on demand. See [Per-instance method mocks](method-mocking.md#per-instance-method-mocks).
-
-### Interface mocks via `rewire.NewMock[T]`
-
-Synthesize a concrete backing struct for an interface at compile time, triggered purely by a reference in a test. No `go:generate`, no committed `mock_*_test.go` files, no separate CLI invocation. Stubbing uses the same `rewire.InstanceFunc` verb as per-instance concrete method mocks — one API vocabulary across both. See [Interface Mocks](interface-mocks.md).
-
-Handles non-generic interfaces, generic interfaces with arbitrary type-argument shapes (builtins, slices, maps, pointers, external-package types, nested generics), embedded interfaces (same-file, same-package, and cross-package — including generic embeds where the outer interface's type parameter flows into the embed), methods referencing same-package types as bare identifiers (auto-qualified with the declaring package alias at generation time), and interfaces declared in files that use dot imports (`import . "pkg"` — the generator detects the dot import and qualifies bare idents with the dot-imported package's alias rather than the declaring package). Package resolution goes through `go list`, so `replace` directives in `go.mod`, workspace files (`go.work`), and vendor directories all work as expected. Each instantiation produces its own backing struct keyed on `reflect.TypeFor[I]()`.
-
-### Expectation DSL
-
-`expect.For(t, target)` and `expect.ForInstance(t, instance, target)` layer a fluent rule-builder DSL on top of any rewire mock. Supports literal argument matching (`.On`), typed predicates (`.Match`), catch-all fallback (`.OnAny`), fixed and callback responses (`.Returns` / `.DoFunc`), call-count bounds (`.Times` / `.AtLeast` / `.Never` / `.Maybe`), and async synchronization (`.Wait`). Automatic verification at test end reports unmet bounds with source locations. See [Expectations DSL](expectations.md).
-
-### `rewire.Real` — spy pattern
-
-Returns the pre-rewrite implementation of a target so a mock closure can delegate to it. Works for functions, methods, generic functions, and generic methods. See [Function Mocking → Spying](function-mocking.md#spying-delegating-to-the-real-implementation).
-
-### Mid-test cleanup — `RestoreFunc` / `RestoreInstance` / `RestoreInstanceFunc`
-
-Three dedicated verbs covering every scope: clear a global function/method mock, clear every per-instance mock bound to one receiver, or clear one specific `(instance, method)` entry. Complements the automatic `t.Cleanup` teardown with a way to end mocks mid-test.
-
-### Inlining compatibility (verified)
-
-Rewire's rewrite transformation is small enough that Go's inliner inlines the wrapper into callers and `_real_X` into the wrapper, so the fast path at every call site is the original body plus a nil-check. `scripts/check-inlining.sh` runs in CI and asserts the expected inlining decisions appear in `go build -gcflags=-m=2` output, so a future compiler or rewriter change can't silently regress this.
-
-### Generic functions and generic methods
-
-`rewire.Func`, `rewire.Real`, `rewire.RestoreFunc`, and `rewire.InstanceFunc` all support generics on a per-instantiation basis. Each type-argument combination is dispatched independently via a sync.Map keyed on the concrete type signature. See [How It Works → Generic functions](how-it-works.md#generic-functions).
-
-### API naming pass
-
-The public surface has been through a coherent rename: `InstanceMethod → InstanceFunc`, the overloaded `Restore` split into `RestoreFunc` / `RestoreInstance` / `RestoreInstanceFunc`, and the unused `Replace` escape hatch removed. `expect.For` / `expect.ForInstance` were kept — they read well as DSL grammar.
+This page tracks what rewire is exploring, what we're deliberately leaving alone, and — folded away at the bottom — what has already shipped. The majority of the original roadmap has landed, so the forward-looking sections come first.
 
 ## Exploratory / future ideas
 
@@ -104,3 +60,23 @@ Deliberate — we're not planning to add these because they'd conflict with rewi
 
 - **A full Mockito-equivalent DSL.** The `expect` package covers the common 80% with literal matching, predicates, call-count bounds, and async wait. Past that, interface-based libraries with richer DSLs are a better fit.
 - **Runtime function replacement.** The whole point of the toolexec approach is that mocks are compile-time only — the production binary has no rewire overhead beyond a nil-check wrapper per mocked target.
+
+---
+
+<details>
+<summary><sub>Already shipped — the feature set rewire offers today</sub></summary>
+
+Kept at the bottom of the page for reference. Each item links to its full feature doc.
+
+- **[Function mocking](function-mocking.md)** — replace any function (your own, third-party, stdlib) with a closure at test time. Per-instantiation support for generics.
+- **[Method mocking, global](method-mocking.md)** — Go method expressions (`(*Type).Method` / `Type.Method`), no interface extraction required. Applies to every instance of the type.
+- **[Per-instance method mocks](method-mocking.md#per-instance-method-mocks)** — `rewire.InstanceFunc` scopes a method replacement to one receiver. Backed by a per-method `_ByInstance sync.Map` emitted on demand.
+- **[Interface mocks](interface-mocks.md)** — `rewire.NewMock[T]` synthesizes a backing struct at compile time. Handles non-generic and generic interfaces with arbitrary type-arg shapes (builtins, slices, maps, pointers, external-package types, nested generics), embedded interfaces (same-file, same-package, cross-package, generic embeds with type-parameter flow), bare same-package identifiers, and dot imports. Package resolution goes through `go list` so `replace` / `go.work` / vendor all work. No `go:generate`, no committed mock files.
+- **[Expectation DSL](expectations.md)** — `expect.For` / `expect.ForInstance` layer a fluent rule-builder on top of any rewire mock: literal matching (`.On`), typed predicates (`.Match`), catch-all (`.OnAny`), responses (`.Returns` / `.DoFunc`), call-count bounds (`.Times` / `.AtLeast` / `.Never` / `.Maybe`), async sync (`.Wait`). Automatic verification with source locations.
+- **[`rewire.Real`](function-mocking.md#spying-delegating-to-the-real-implementation)** — spy pattern: returns the pre-rewrite implementation so a mock closure can delegate to it. Works for functions, methods, and generics.
+- **`RestoreFunc` / `RestoreInstance` / `RestoreInstanceFunc`** — three dedicated mid-test cleanup verbs covering every scope (global func, all-on-receiver, one entry). Complement the automatic `t.Cleanup` teardown.
+- **Inlining compatibility (verified)** — the wrapper inlines into callers; `scripts/check-inlining.sh` in CI asserts the expected inlining decisions via `go build -gcflags=-m=2` so a future compiler or rewriter change can't silently regress the fast path.
+- **Generic functions and generic methods** — `rewire.Func`, `rewire.Real`, `rewire.RestoreFunc`, and `rewire.InstanceFunc` all support generics on a per-instantiation basis via a `sync.Map` keyed on the concrete type signature.
+- **API naming pass** — `InstanceMethod → InstanceFunc`, the overloaded `Restore` split into `RestoreFunc` / `RestoreInstance` / `RestoreInstanceFunc`, and the unused `Replace` escape hatch removed. `expect.For` / `expect.ForInstance` kept as DSL grammar.
+
+</details>
