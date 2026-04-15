@@ -46,6 +46,49 @@ Rewire's rewrite transformation is small enough that Go's inliner inlines the wr
 
 The public surface has been through a coherent rename: `InstanceMethod → InstanceFunc`, the overloaded `Restore` split into `RestoreFunc` / `RestoreInstance` / `RestoreInstanceFunc`, and the unused `Replace` escape hatch removed. `expect.For` / `expect.ForInstance` were kept — they read well as DSL grammar.
 
+## Exploratory / future ideas
+
+Ideas we're curious about but haven't committed to. Listed here so we don't lose the thread; none of them are scheduled.
+
+### `rewire.Package` — whole-package swap
+
+Replace an entire package with a structurally-compatible alternative for the duration of a test, instead of mocking symbols one at a time:
+
+```go
+rewire.Package[bar](t, fakebar)  // every call into bar is routed to fakebar
+```
+
+The substitute must satisfy bar's exported API (same function signatures, same exported types, same method sets). Validation would run at compile time so a mismatch fails the build, not the test.
+
+Open questions:
+
+- **Scope of "public API".** Just top-level functions, or also exported types, constants, vars, and method sets on exported types? Full package parity is a harder compile-time check than the current per-function rewrite.
+- **State and package-level vars.** If `bar` has package-level state (sync.Once, init(), globals), does the replacement share it, mirror it, or start fresh? Each answer breaks a different set of tests.
+- **Vs. `rewire.Func`.** For tests that only need to stub one or two symbols, the per-function API is simpler. Package-level swap is for cases where you'd otherwise stub 10+ symbols to cover one "seam" in the code.
+- **Interaction with existing mocks.** If a test calls `rewire.Package` and `rewire.Func` on a target in that package, which wins? Probably `rewire.Func` at per-symbol resolution, but worth thinking through the dispatch order.
+
+The mechanism would reuse the existing toolexec pipeline: scan for `rewire.Package[P]` calls, emit per-symbol dispatch wrappers in the production source of `P` (as we do today for `rewire.Func`), and route through a package-level swap variable set by the test.
+
+### Opt-in production rewiring
+
+Today rewire is test-only: the toolexec wrapper rewrites functions only when compiling a test binary, and the `rewire.Func` / `rewire.InstanceFunc` APIs take `*testing.T`. An experimental direction: let production code opt into the same rewiring machinery, at either function or package granularity, so runtime swaps become possible without committing to a plugin architecture up front.
+
+Potential use cases:
+
+- **Feature flags without wiring.** Toggle one implementation vs. another without threading a flag through function arguments or package-level state.
+- **Canary / shadow traffic.** Route a small fraction of production calls through an alternative implementation for A/B comparison, with rollback being a single swap back.
+- **Late-binding implementations.** Plugin-like dispatch without `plugin.Open`, since rewire's wrappers are plain Go and inline away when no swap is active.
+
+Open questions (all serious):
+
+- **Binary bloat and overhead.** Today the wrapper is a nil-check that inlines; a production-opt-in version has to stay just as cheap. Any added bookkeeping changes the calculus.
+- **Thread safety and publication.** Tests mock before calling; production would swap live. That needs proper ordering (sync.Map, atomic.Pointer, or similar) and a story for in-flight calls during a swap.
+- **Opt-in marking.** How does a function or package declare it's available for production swap? A build tag, a magic comment, a separate API? The marker has to be something the scanner can pick up without a centralized registry.
+- **Security and governance.** Production rewiring is effectively arbitrary code execution from whoever can call the swap API. Any shipped version would need a clear "who is allowed to swap what" story — probably compile-time gating rather than runtime authorization.
+- **Relation to the `rewire.Func` non-goal on runtime patching.** This is not runtime machine-code patching; it's compile-time rewriting + a runtime-swappable dispatch table. The non-goal stands for code patching; this idea coexists with it.
+
+A fun experiment. Likely a separate subpackage (`rewire/live` or similar) if it ever happens, to keep the core test-focused API uncontaminated.
+
 ## Gaps we're not actively tackling
 
 These are more fundamental than the items above. We list them so expectations are clear, not because we're working on them.
