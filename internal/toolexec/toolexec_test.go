@@ -386,6 +386,74 @@ func TestHostname(t *testing.T) {
 	}
 }
 
+// TestGenerateRegistration_AliasCollisionThreePackages exercises the
+// alias-avoidance logic in generateRegistration. Three import paths
+// whose last segment is "bar" (foo/bar, baz/bar, qux/bar) should each
+// get a distinct Go import alias in the generated registration file —
+// otherwise the generated file fails to compile with "redeclared in
+// this block".
+func TestGenerateRegistration_AliasCollisionThreePackages(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Synthesize a test source file that imports rewire + all three
+	// bar-suffixed packages. generateRegistration only parses
+	// ImportsOnly, so the imported paths don't need to resolve to real
+	// packages.
+	src := `package testpkg
+
+import (
+	_ "github.com/GiGurra/rewire/pkg/rewire"
+	_ "example.com/foo/bar"
+	_ "example.com/baz/bar"
+	_ "example.com/qux/bar"
+)
+`
+	srcPath := filepath.Join(tmpDir, "testpkg_test.go")
+	if err := os.WriteFile(srcPath, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	targets := mockTargets{
+		"example.com/foo/bar": {"Greet"},
+		"example.com/baz/bar": {"Greet"},
+		"example.com/qux/bar": {"Greet"},
+	}
+
+	out, err := generateRegistration([]string{srcPath}, targets, nil, nil)
+	if err != nil {
+		t.Fatalf("generateRegistration: %v", err)
+	}
+	if out == "" {
+		t.Fatal("generateRegistration returned empty output — all three bar packages were dropped")
+	}
+
+	// Collect every `_rewire_<alias> "<import path>"` line from the
+	// import block and check that no alias appears twice.
+	seen := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "_rewire_") {
+			continue
+		}
+		// Expected shape: `_rewire_bar "example.com/foo/bar"`
+		sp := strings.IndexByte(line, ' ')
+		if sp < 0 {
+			continue
+		}
+		alias := line[:sp]
+		importPath := strings.Trim(strings.TrimSpace(line[sp+1:]), `"`)
+		if prev, ok := seen[alias]; ok {
+			t.Fatalf("alias %q reused: %s and %s — generated file will not compile\n\n%s",
+				alias, prev, importPath, out)
+		}
+		seen[alias] = importPath
+	}
+
+	if len(seen) != 3 {
+		t.Fatalf("expected 3 distinct aliases, got %d: %v\n\n%s", len(seen), seen, out)
+	}
+}
+
 // ensureRewireInstalled builds and installs the rewire binary if it
 // isn't already in $PATH. Integration tests that shell out to
 // `go test -toolexec=rewire` need the binary available.

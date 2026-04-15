@@ -715,14 +715,19 @@ func generateRegistration(compileArgs []string, targets mockTargets, instantiati
 			continue
 		}
 
-		// Derive package qualifier from import path (last segment)
+		// Derive package qualifier from import path (last segment).
+		// Collisions (e.g. foo/bar vs baz/bar) are broken by suffixing
+		// a counter. Walk until we find an unused name so three-way
+		// and N-way collisions all produce distinct aliases, and a
+		// renamed alias can't accidentally match another package's
+		// base name (e.g. a package literally called "bar_2").
 		segments := strings.Split(importPath, "/")
 		pkgLocalName := segments[len(segments)-1]
 		alias := "_rewire_" + pkgLocalName
-		if count := usedAliases[alias]; count > 0 {
-			alias = fmt.Sprintf("_rewire_%s_%d", pkgLocalName, count+1)
+		for n := 2; usedAliases[alias] > 0; n++ {
+			alias = fmt.Sprintf("_rewire_%s_%d", pkgLocalName, n)
 		}
-		usedAliases[alias]++
+		usedAliases[alias] = 1
 
 		entries = append(entries, entry{
 			importPath: importPath,
