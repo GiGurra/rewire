@@ -52,21 +52,40 @@ if m := lookupMock(testID, "pkg.Foo"); m != nil { return m(args...) }
 wrapper shape, the registry API, and the dispatch hot path. Worth a
 design doc before code.
 
-### 3. AST-as-text generation
+### 3. AST-as-text generation — evaluated 2026-04-17, no action
 
-Both `internal/rewriter/` and `internal/mockgen/` build code via
-`fmt.Sprintf` + re-parse. The comments defend this well (parse+print
-validates syntax, diffs are readable), but `clearNodePositions`
-walking AST nodes via reflection is exactly the kind of code that
-breaks silently when `go/ast` grows a field.
+**Verdict**: close, don't migrate. Original critique was overstated.
 
-**Direction**: switch to direct `ast.Node` construction (possibly via
-`dst.NewPackage`/`dst` for easier decoration), which removes the need
-for position clearing entirely.
+The concern was that `clearNodePositions` in
+`internal/rewriter/rewriter.go:764–789` walks AST nodes via
+reflection and would "break silently when `go/ast` grows a field."
+On closer inspection, the reflection keys on
+`reflect.TypeOf(token.NoPos)` — a stable sentinel type — so any
+future `token.Pos` field on any AST node type is automatically
+handled. The realistic failure mode would be Go changing
+`token.Pos` to a non-int64 type, which would break every `go/ast`
+consumer in the ecosystem, not specifically rewire.
 
-**Tradeoff**: more code, and the text approach has never actually
-broken in practice. Not urgent. Fine to defer indefinitely if no
-concrete pain.
+Migration cost (full rewrite of both `internal/rewriter` and
+`internal/mockgen` to build `ast.Node` trees directly, or adopt
+`github.com/dave/dst`) is substantial. Gain is ~22 lines of
+well-commented reflection removed, a cleaner mental model if you
+already know `dst`, and a negligible speedup. Not worth it at
+current scope.
+
+The text-based approach is also **easier to extend** for the cases
+that currently add generation logic (new wrapper features extend a
+`fmt.Sprintf` template; test assertions are coarse substring
+matches), so the working conventions match what the codebase
+actually does.
+
+**If this is ever revisited**, the trigger would be one of:
+- `clearNodePositions` actually breaking on a future Go release
+- A wrapper feature that's genuinely awkward to express as text
+- Adopting `dst` for a different reason (e.g., gopls overlay work
+  in the roadmap)
+
+Until then, status quo is the correct choice.
 
 ### 4. Generic dispatch cost
 
