@@ -54,6 +54,22 @@ func _real_Greet(name string) string {
 
 The wrapper uses `_rewire_mock` as the local variable name to avoid shadowing function parameters (e.g., math functions commonly use `f` for `float64`).
 
+### Dispatch for generic functions
+
+The wrapper shape above is effectively free to call — one nil check against a typed function pointer, usually branch-predicted away when no mock is set. Generic functions can't use the same shape: Go monomorphizes generics lazily, so the wrapper body is shared across instantiations, and there's no compile-time name the wrapper can spell to distinguish `Map[int, string]` from `Map[float64, bool]` at dispatch time.
+
+The rewriter handles this with a single `sync.Map` per generic function, keyed on a per-instantiation type-signature string obtained via `reflect.TypeOf(Map[T, U]).String()` — see [Generic functions in how-it-works](how-it-works.md#generic-functions) for the generated code. That reflect call is load-bearing: without it there's no way at runtime to name "the instantiation currently executing." The concrete cost per call into a rewritten generic function is:
+
+- A `reflect.TypeOf` call
+- A string allocation for the type name (e.g. `"func([]int, func(int) string) []string"`)
+- A `sync.Map.Load` with atomics
+
+Probably hundreds of nanoseconds per call, vs a few ns for the non-generic nil check — roughly three orders of magnitude.
+
+**This is a deliberate scope choice, not an oversight.** In tests the cost is invisible against any realistic test body, and the alternative — having the rewriter emit one specialized wrapper per instantiation the scanner saw — is a substantial codegen rework that buys nothing at test-time call rates.
+
+It does constrain future scope. [Opt-in production rewiring](roadmap.md#opt-in-production-rewiring) on the roadmap would expose generic-function dispatch to real production call volumes, where hundreds of nanoseconds per call is no longer invisible. If that direction is ever pursued, the generic dispatch path wants rethinking first — most likely by specializing the wrapper per instantiation at compile time so the reflect disappears on the hot path.
+
 ### The registration mechanism
 
 For each test binary, toolexec generates a registration file directly from mock targets:
