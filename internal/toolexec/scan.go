@@ -85,7 +85,15 @@ type mockInstance struct {
 type mockedInterfaces map[string]map[string][]mockInstance
 
 // scanCache is the on-disk cache format written by loadOrScanMockTargets.
+//
+// Header carries the identity of the build session that wrote the
+// cache — parent PID, parent process start time, and module root.
+// Readers recompute the expected header for the current invocation
+// and reject the cache on any mismatch, which prevents a PID that's
+// been reissued to a new process from inheriting stale scan results
+// written by the previous occupant of that PID.
 type scanCache struct {
+	Header           cacheHeader           `json:"header"`
 	Targets          mockTargets           `json:"targets"`
 	Instantiations   genericInstantiations `json:"instantiations"`
 	ByInstance       byInstanceTargets     `json:"byInstance"`
@@ -100,12 +108,15 @@ type scanCache struct {
 // of interface types referenced by rewire.NewMock[I] for which the
 // codegen should emit a backing struct.
 //
-// Results are cached per build session (keyed on parent PID). Reads
-// are **lock-free**: once the cache file exists, any rewire process
-// can open and decode it without touching the flock. Writes are
-// atomic (temp file + rename) so readers always see either the old
-// or the new snapshot, never a partial one. Only the first
-// process-to-arrive takes the lock to scan + write.
+// Results are cached per build session (keyed on parent PID, with
+// (parent start time, module root) written into the cache file as
+// identity so a reissued PID can't inherit stale scan results).
+// Reads are **lock-free**: once the cache file exists, any rewire
+// process can open, decode, and verify its header without touching
+// the flock. Writes are atomic (temp file + rename) so readers
+// always see either the old or the new snapshot, never a partial
+// one. Only the first process-to-arrive takes the lock to scan +
+// write.
 //
 // This matters because Go's build system runs compile invocations
 // in parallel (GOMAXPROCS wide), so dozens of rewire processes can
@@ -113,21 +124,35 @@ type scanCache struct {
 // other. An exclusive flock on the read path serializes them and
 // adds measurable overhead; a lock-free read lets them all proceed
 // in parallel.
+//
+// If the parent-process identity can't be determined (unsupported
+// platform, parent exited, access denied), the cache is bypassed
+// entirely — every invocation rescans. Slower but always correct.
 func loadOrScanMockTargets(moduleRoot string) (mockTargets, genericInstantiations, byInstanceTargets, mockedInterfaces) {
+	want, ok := currentHeader(moduleRoot)
+	if !ok {
+		// Can't verify parent identity — any cache we'd read could
+		// belong to a different process that happened to reuse this
+		// PID. Scan fresh every time rather than risk stale data.
+		return scanAllTestFiles(moduleRoot)
+	}
+
 	cacheDir := filepath.Join(os.TempDir(), fmt.Sprintf("rewire-%d", os.Getppid()))
 	cacheFile := filepath.Join(cacheDir, "mock_targets.json")
 	lockPath := filepath.Join(cacheDir, "mock_targets.lock")
 
-	// Fast path: lock-free cache read. If the file exists and
-	// decodes cleanly, return immediately — no lock acquired, no
-	// serialization against other parallel readers.
-	if cache, ok := readScanCacheFile(cacheFile); ok {
+	// Fast path: lock-free cache read. If the file exists, decodes
+	// cleanly, and its header matches our current identity, return
+	// immediately — no lock acquired, no serialization against other
+	// parallel readers.
+	if cache, ok := readScanCacheFile(cacheFile, want); ok {
 		return cache.Targets, cache.Instantiations, cache.ByInstance, cache.MockedInterfaces
 	}
 
-	// Slow path: cache doesn't exist (or failed to decode). We
-	// need to either scan ourselves or wait for another process to
-	// scan. Acquire the lock to serialize competing scanners.
+	// Slow path: cache doesn't exist, failed to decode, or belongs
+	// to a different build session (e.g. PID reused). We need to
+	// either scan ourselves or wait for another process to scan.
+	// Acquire the lock to serialize competing scanners.
 	_ = os.MkdirAll(cacheDir, 0755)
 	fl := flock.New(lockPath)
 	if err := fl.Lock(); err != nil {
@@ -140,7 +165,7 @@ func loadOrScanMockTargets(moduleRoot string) (mockTargets, genericInstantiation
 
 	// Under the lock, another process may have written the cache
 	// while we were waiting. Re-check before scanning.
-	if cache, ok := readScanCacheFile(cacheFile); ok {
+	if cache, ok := readScanCacheFile(cacheFile, want); ok {
 		return cache.Targets, cache.Instantiations, cache.ByInstance, cache.MockedInterfaces
 	}
 
@@ -148,6 +173,7 @@ func loadOrScanMockTargets(moduleRoot string) (mockTargets, genericInstantiation
 	targets, insts, byInst, mockedIfaces := scanAllTestFiles(moduleRoot)
 
 	cache := scanCache{
+		Header:           want,
 		Targets:          targets,
 		Instantiations:   insts,
 		ByInstance:       byInst,
@@ -159,12 +185,13 @@ func loadOrScanMockTargets(moduleRoot string) (mockTargets, genericInstantiation
 }
 
 // readScanCacheFile tries to read and unmarshal the cache file at
-// path. Returns the decoded cache and `true` on success, or `zero,
-// false` if the file is missing, unreadable, or malformed. Safe to
-// call concurrently from many processes — a partial write from the
-// writer process can't be observed because writeScanCacheFile uses
-// temp+rename.
-func readScanCacheFile(path string) (scanCache, bool) {
+// path, and verifies its header matches want. Returns the decoded
+// cache and `true` on success, or `zero, false` if the file is
+// missing, unreadable, malformed, or belongs to a different build
+// session (identity mismatch). Safe to call concurrently from many
+// processes — a partial write from the writer process can't be
+// observed because writeScanCacheFile uses temp+rename.
+func readScanCacheFile(path string, want cacheHeader) (scanCache, bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return scanCache{}, false
@@ -174,6 +201,9 @@ func readScanCacheFile(path string) (scanCache, bool) {
 		return scanCache{}, false
 	}
 	if cache.Targets == nil {
+		return scanCache{}, false
+	}
+	if cache.Header != want {
 		return scanCache{}, false
 	}
 	return cache, true
