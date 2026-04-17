@@ -64,6 +64,7 @@ After changing rewire source: always `go install ./cmd/rewire/` before running t
   - `bar/bar.go` — production functions and types (`Greet`, `Greeter`, generic `Container[T]`)
   - `bar/interfaces.go` — interfaces for mock generation (`GreeterIface`, `Store`, `Logger`, `HTTPClient`, `ContainerIface[T any]`, `CacheIface[K comparable, V any]`, `Repository[T any]`)
   - `foo/` — tests using `rewire.Func` (function/method/stdlib mocking) and `rewire.NewMock[T]` (interface mocks, generic interface mocks, dependency-injected services like `UserService` backed by `Repository[User]`)
+- `scripts/benchtool/` — Benchmark harness (`gen` / `bench` / `scale` subcommands). Generates synthetic modules of varying size, runs `go test -run '^$'` with and without rewire to measure compile+link overhead, and streams results as JSONL. `scripts/benchtool/results/` holds dated reference runs; `docs/design.md` quotes numbers from these. Pair with `REWIRE_PROFILE=1` (see `internal/toolexec/profile.go`) for per-stage timing inside the toolexec wrapper.
 
 ## Key design decisions
 
