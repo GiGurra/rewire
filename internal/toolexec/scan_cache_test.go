@@ -112,3 +112,24 @@ func TestReadScanCacheFile_MalformedJSON(t *testing.T) {
 		t.Errorf("expected miss on malformed JSON, got hit")
 	}
 }
+
+// A cache whose header matches but whose Targets is nil is rejected
+// before we even look at the header — the nil-Targets guard in
+// readScanCacheFile catches caches that decoded successfully but
+// carry no useful payload (e.g. a file truncated after the header
+// was written, or a future format where Targets was moved under a
+// different key). Without this branch, such a cache would return
+// ok=true with a nil map and the caller would mistake empty-targets
+// for "no rewire calls found in the module."
+func TestReadScanCacheFile_RejectsNilTargets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mock_targets.json")
+	header := cacheHeader{ParentPID: 1234, ParentStartTime: 5678, ModuleRoot: "/proj/a"}
+	headerOnly := []byte(`{"header":{"parentPid":1234,"parentStartTime":5678,"moduleRoot":"/proj/a"}}`)
+	if err := os.WriteFile(path, headerOnly, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := readScanCacheFile(path, header); ok {
+		t.Errorf("expected miss on cache with matching header but nil Targets, got hit")
+	}
+}

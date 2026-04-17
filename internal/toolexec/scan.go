@@ -137,7 +137,13 @@ func loadOrScanMockTargets(moduleRoot string) (mockTargets, genericInstantiation
 		return scanAllTestFiles(moduleRoot)
 	}
 
-	cacheDir := filepath.Join(os.TempDir(), fmt.Sprintf("rewire-%d", os.Getppid()))
+	// Use the PID already captured in `want` rather than a second
+	// os.Getppid() call. If the real parent has exited between
+	// currentHeader and here, os.Getppid() would return the reaper's
+	// PID (init/launchd), and we'd write the cache under that
+	// directory while its header still pointed at the original
+	// parent — wasted I/O and pollution of the reaper's tree.
+	cacheDir := filepath.Join(os.TempDir(), fmt.Sprintf("rewire-%d", want.ParentPID))
 	cacheFile := filepath.Join(cacheDir, "mock_targets.json")
 	lockPath := filepath.Join(cacheDir, "mock_targets.lock")
 
