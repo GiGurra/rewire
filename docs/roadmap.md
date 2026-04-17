@@ -49,7 +49,7 @@ A fun experiment. Likely a separate subpackage (`rewire/live` or similar) if it 
 
 These are more fundamental than the items above. We list them so expectations are clear, not because we're working on them.
 
-- **Parallel test safety for the same target.** `t.Parallel()` tests that mock the *same* function with different replacements will race on the shared `Mock_` variable. Parallel tests mocking *different* targets are fine.
+- **Parallel test safety for the same target.** `t.Parallel()` tests that mock the *same* function with different replacements will race on the shared `Mock_` variable. Parallel tests mocking *different* targets are fine. **Investigated:** an end-to-end working prototype exists at [PR #6](https://github.com/GiGurra/rewire/pull/6) using goroutine-inherited pprof labels as a per-test identity. Held back because it relies on an unofficial linkname loophole and the resulting wrapper is too complex for Go's inliner — see [`plans/parallel_test_safety_findings.md`](https://github.com/GiGurra/rewire/blob/main/plans/parallel_test_safety_findings.md).
 - **Compiler intrinsics.** Functions like `math.Abs`, `math.Sqrt`, `math.Floor` are replaced by CPU instructions at the call site, bypassing any wrapper. Rewire detects these and fails with a clear error. Non-intrinsic alternatives work fine.
 - **Assembly / bodyless functions.** No Go source to rewrite. Detected and rejected at compile time.
 - **Unexported functions across packages.** `bar.greet` (lowercase) can only be referenced from inside package `bar`, so the `rewire.Func` call has to live in `bar`'s own `_test.go` file. Not actively tackled.

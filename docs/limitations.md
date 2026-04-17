@@ -19,6 +19,8 @@ Two parallel tests mocking **different** functions is fine — there's no conten
 !!! note
     This only matters for tests using `t.Parallel()`. Sequential tests (the default) don't have this issue since `t.Cleanup` restores the original between tests.
 
+**Investigated — not shipped.** A working end-to-end prototype exists on a draft PR: [#6 — Parallel-safe `rewire.Func` via goroutine-inherited pprof labels](https://github.com/GiGurra/rewire/pull/6). It replaces the shared `Mock_Foo` variable with a per-goroutine-tree dispatch table keyed on a `runtime/pprof` labels pointer, so parallel tests each see their own mock and child goroutines inherit automatically. Held back from merging because it relies on an unofficial linkname loophole and the new wrapper shape is too complex for Go's inliner to absorb (a real regression on the "rewire is free when not mocked" property). See [`plans/parallel_test_safety_findings.md`](https://github.com/GiGurra/rewire/blob/main/plans/parallel_test_safety_findings.md) for the full write-up of what was learned.
+
 ## Bodyless functions
 
 Functions implemented in assembly (no Go body) cannot be rewritten. These are typically low-level runtime or math functions. Rewire will fail with an error if you try to mock one.
