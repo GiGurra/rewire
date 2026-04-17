@@ -100,6 +100,24 @@ accelerate Go closing it. Preserved here as reference.
 
 ## Why PR #6 isn't merge-ready
 
+- **Wrapper inlining is lost.** The biggest new finding. The
+  current non-generic wrapper compiles to cost ~5, well under
+  Go's 80-node inline budget, so the inliner absorbs it into
+  callers and a mocked call is effectively as fast as a direct
+  call when no mock is set. This branch's wrapper costs ~300
+  because of (a) the `_rewire_getProfLabel` call, which is a
+  body-less linkname stub and therefore **unconditionally
+  non-inlinable** (the inliner has no body to substitute), and
+  (b) the nested labels-pointer check + `sync.Map.Load` + type
+  assertion. The wrappers are no longer inlined. Behavior is
+  unchanged — mocks still take effect at every call site — but
+  the "rewire is free when not mocked" property of the legacy
+  wrapper is gone, and the branch's CI `scripts/check-inlining.sh`
+  step is turned off with `if: false`. Restoring inlining would
+  require shrinking the dispatch head substantially (likely
+  requires compiled-in ASM instead of a linkname stub) or making
+  the dispatch head opt-in per target so unflagged functions
+  keep the old shape.
 - **Linkname loophole is unofficial.** Future Go releases could
   restrict it further. Fallback would be either `runtime.Stack()`
   parsing (1000× slower, visible regression) or inline ASM
