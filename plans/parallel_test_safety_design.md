@@ -91,6 +91,76 @@ subtest cleanup).
 
 Still not wired into the rewriter — that's the follow-up work.
 
+### Benchmarks (Apple M4, Go 1.26.2)
+
+```
+BenchmarkParallelProto_DirectCall             12.81 ns/op
+BenchmarkParallelProto_NilCheckWrapper        13.26 ns/op   current rewire wrapper
+BenchmarkParallelProto_RuntimeGetProfLabel     1.61 ns/op   linkname call alone
+BenchmarkParallelProto_LookupNoLabels          1.74 ns/op   nil labels → bail
+BenchmarkParallelProto_LookupMissAfterLabel    5.66 ns/op   labels set, target not mocked
+BenchmarkParallelProto_LookupHit              15.23 ns/op   sync.Map.Load × 2 + hit
+BenchmarkParallelProto_WrapperMiss            19.92 ns/op   full wrapper, no mock
+BenchmarkParallelProto_WrapperHit             28.03 ns/op   full wrapper, mock present
+BenchmarkReference_StackParseGoid            992.80 ns/op   what the fallback would cost
+```
+
+Takeaways:
+
+- The `runtime/pprof.runtime_getProfLabel` linkname call is ~1.6 ns —
+  essentially as fast as hand-rolled ASM (outrigdev/goid reports
+  1.306 ns on M3 Pro for their ASM path). No measurable disadvantage
+  vs reading the g struct directly.
+- Full wrapper on a flagged target adds +7 ns over the current
+  non-generic wrapper (13 ns → 20 ns). Acceptable on a per-call
+  basis for tests; the 500× gap vs Stack-parsing fallback is
+  reassuring.
+- The 8 B/op + 1 alloc/op on wrapper benchmarks is the
+  `"direct:"+name` string concat in the benchmark target, not
+  anything rewire does. The lookup itself is 0 B/op.
+
+### Inheritance and override semantics
+
+A realistic question for anyone considering this as general-purpose
+goroutine-local storage: how do child writes interact with parent
+state?
+
+- **Inheritance happens at spawn only.** When `go func(){...}()`
+  starts a child, its `g.labels` field is initialized to the parent's
+  labels pointer value. Single assignment at creation time; no
+  ongoing link between parent and child.
+- **`SetGoroutineLabels` in the child is strictly local.** It
+  replaces the child's own `g.labels` pointer. The parent's pointer
+  (and whatever labels it points at) is unaffected.
+- **Augmenting parent's labels requires threading the context.** To
+  keep parent's key/value pairs visible while adding child-specific
+  ones, the child needs to call `pprof.WithLabels(parentCtx, ...)` —
+  which requires having the parent's `context.Context`. In rewire's
+  use we don't care (we only use the labels *pointer* as an identity,
+  never the key/value content), but a GLS library would either need
+  to thread contexts anyway or poke at pprof's internal `labelMap`
+  structure.
+
+For rewire specifically this matches what we want: the test
+installs a labels pointer once, and that pointer serves as identity
+for the entire test goroutine tree. Child goroutines inherit the
+pointer and thus the mock table. Children don't typically call
+`SetGoroutineLabels` themselves, so the identity stays stable.
+
+### Ecosystem note
+
+Surveyed open-source GLS / goid libraries (petermattis/goid,
+huandu/go-tls, modern-go/gls, jtolio/gls, timandy/routine,
+outrigdev/goid, and others). Only timandy/routine genuinely
+benefits from the pprof-stub-linkname finding, because its
+`InheritableThreadLocal` feature needs child inheritance and it
+currently achieves that via ASM + a separate toolexec compiler
+(`routinex`) to sidestep Go 1.23's linkname restrictions. Everyone
+else either wants strict isolation (inheritance is wrong for them)
+or only cares about bare ID lookup (ASM is faster). Decided not to
+evangelize the finding — it's a linker loophole, not a documented
+API, and wide promotion could accelerate Go closing it.
+
 ---
 
 ## Original options analysis (superseded by section above)
