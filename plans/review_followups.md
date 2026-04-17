@@ -34,23 +34,31 @@ mismatch → re-scan + rewrite.
 adds a cheap syscall or two on cache hit. Cheaper than re-hashing the
 scanned file set.
 
-### 2. Parallel-test limitation
+### 2. Parallel-test limitation — investigated, working prototype in draft PR #6
 
-Single package-global `Mock_Foo` variable per target is what makes
-registration and dispatch cheap, but it's also what prevents
-`t.Parallel()` on same-target tests (documented as a limitation in
-`docs/limitations.md`).
+**Status**: end-to-end working implementation exists on
+`proto/parallel-safety-experimental` (draft PR #6). Full test
+suite passes including `-race`. Not merged: the mechanism leans
+on a linkname loophole and needs API-shape decisions before it
+could ship.
 
-**Direction**: look up mocks via a goroutine-local map (test `*T`
-pointer → per-test mock table) instead of reading a package global.
-Wrapper becomes:
-```go
-if m := lookupMock(testID, "pkg.Foo"); m != nil { return m(args...) }
-```
+**Mechanism that actually worked** (different from the original
+"goroutine-local map keyed on test *T pointer" direction in this
+doc): **pprof labels as goroutine identity.**
+`pprof.SetGoroutineLabels` is public API, the labels pointer is
+per-goroutine, and crucially it's **inherited automatically by
+child goroutines** at spawn time. Read via
+`//go:linkname runtime/pprof.runtime_getProfLabel` — a single
+linkname through pprof that's reachable under Go 1.23+ rules
+because runtime pushes the symbol out to pprof.
 
-**Tradeoff**: real redesign, not a tweak. Affects the rewriter's
-wrapper shape, the registry API, and the dispatch hot path. Worth a
-design doc before code.
+See `plans/parallel_test_safety_findings.md` for the full write-up
+of lessons learned: why goroutine-ID keying doesn't work in
+Go 1.23+, why cross-package linkname into rewire doesn't work for
+test binaries that don't transitively import rewire, why a
+per-package state architecture (each rewritten function has its
+own `Mock_Foo_ByGoroutine sync.Map`) beats a central map, and
+what still needs resolving before this could merge.
 
 ### 3. AST-as-text generation — evaluated 2026-04-17, no action
 
