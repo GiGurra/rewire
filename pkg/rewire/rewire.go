@@ -11,16 +11,32 @@ import (
 )
 
 var (
-	registry            sync.Map // func name (string) → mock var pointer (any)
-	realRegistry        sync.Map // func name (string) → real function value (any)
-	byInstanceRegistry  sync.Map // func name (string) → *sync.Map (per-method per-instance table)
-	mockFactoryRegistry sync.Map // interface name (string) → func() any (mock instance factory)
+	registry             sync.Map // func name (string) → mock var pointer (any)
+	realRegistry         sync.Map // func name (string) → real function value (any)
+	byInstanceRegistry   sync.Map // func name (string) → *sync.Map (per-method per-instance table)
+	mockFactoryRegistry  sync.Map // interface name (string) → func() any (mock instance factory)
+	goroutineMapRegistry sync.Map // func name (string) → *sync.Map (per-function goroutine-keyed table; key: uintptr labels pointer, value: replacement fn)
 )
 
 // Register maps a fully-qualified function name to a pointer to its mock variable.
 // This is called by generated init() code — users should not call it directly.
 func Register(funcName string, mockVarPtr any) {
 	registry.Store(funcName, mockVarPtr)
+}
+
+// RegisterGoroutineMap maps a fully-qualified function name to the
+// per-function *sync.Map that the rewriter emitted for
+// goroutine-local dispatch (Mock_Foo_ByGoroutine). Called by
+// generated init() code — users should not call it directly.
+//
+// Func writes replacements into this map keyed on the pprof labels
+// pointer of the calling goroutine, which is what the rewriter-
+// generated wrapper reads at dispatch time. Per-function rather
+// than a central map so each rewritten package is self-contained
+// (avoids cross-package linkname requirements that would force
+// rewire into every test binary's link set).
+func RegisterGoroutineMap(funcName string, byGoroutineMap *sync.Map) {
+	goroutineMapRegistry.Store(funcName, byGoroutineMap)
 }
 
 // RegisterReal maps a fully-qualified function name to its pre-rewrite
@@ -185,18 +201,59 @@ func Func[F any](t *testing.T, original F, replacement F) {
 		return
 	}
 
+	// Validate the target via resolveMockVar. It also gives us the
+	// reflect.Value addressing Mock_Foo, which we only need on the
+	// legacy path (no goroutine map registered).
 	elemVal := resolveMockVar(t, original)
 
-	// Save current value (may be nil)
+	name := funcName(original)
+
+	// Preferred path: per-function goroutine-keyed map, registered
+	// by the rewriter-generated init file. Writes go to the map
+	// keyed on this goroutine's pprof labels pointer — parallel
+	// tests get isolation because each has a distinct pointer.
+	// Critically, we do NOT also write Mock_Foo here: that would
+	// race across parallel tests on a shared variable, defeating
+	// the whole point. The wrapper's Mock_Foo fallback path ends
+	// up unreachable when the map is registered (callers always
+	// hit the goroutine-local dispatch first with a live entry),
+	// and Mock_Foo stays nil.
+	if gMap, ok := loadGoroutineMap(name); ok {
+		key := ensureGoroutineLabeled()
+		oldMock, hadOld := gMap.Swap(key, any(replacement))
+		t.Cleanup(func() {
+			if hadOld {
+				gMap.Store(key, oldMock)
+			} else {
+				gMap.Delete(key)
+			}
+		})
+		return
+	}
+
+	// Legacy path: no goroutine map registered (rewriter was not
+	// run with an ImportPath — e.g. standalone unit tests of the
+	// rewriter). Behaviorally identical to the pre-goroutine-local
+	// implementation, including the parallel-test race on
+	// Mock_Foo that motivated the whole exercise.
 	oldVal := reflect.New(elemVal.Type()).Elem()
 	oldVal.Set(elemVal)
-
-	// Set replacement
 	elemVal.Set(reflect.ValueOf(replacement))
-
 	t.Cleanup(func() {
 		elemVal.Set(oldVal)
 	})
+}
+
+// loadGoroutineMap looks up the per-function goroutine-keyed mock
+// table registered for funcName. Returns (nil, false) if no map is
+// registered — typically because the rewriter wasn't asked to emit
+// goroutine-local dispatch for this target (no ImportPath passed).
+func loadGoroutineMap(funcName string) (*sync.Map, bool) {
+	raw, ok := goroutineMapRegistry.Load(funcName)
+	if !ok {
+		return nil, false
+	}
+	return raw.(*sync.Map), true
 }
 
 // Real returns the pre-rewrite implementation of original — useful for
@@ -313,6 +370,14 @@ func RestoreFunc[F any](t *testing.T, original F) {
 
 	elemVal := resolveMockVar(t, original)
 	elemVal.Set(reflect.Zero(elemVal.Type()))
+
+	// Also clear the per-goroutine entry so the wrapper's
+	// goroutine-local dispatch path doesn't keep routing to the
+	// old replacement. Mirrors the dual-write behavior of Func.
+	name := funcName(original)
+	if gMap, ok := loadGoroutineMap(name); ok {
+		gMap.Delete(ensureGoroutineLabeled())
+	}
 }
 
 // RestoreInstance clears every per-instance mock currently scoped to
