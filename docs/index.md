@@ -41,31 +41,6 @@ Rewire's bet is that the same compile-time rewriting machinery can cover all the
 
 All of these compose in a single test. You can mix a function mock, a global method mock, a per-instance method mock, and an interface mock — and they all share one API vocabulary.
 
-## Quick example
-
-A fully self-contained test — just stdlib, no production code to set up. We mock `os.Getwd` and then call `filepath.Abs`, which internally uses `os.Getwd` to resolve a relative path:
-
-```go
-import (
-    "os"
-    "path/filepath"
-    "testing"
-
-    "github.com/GiGurra/rewire/pkg/rewire"
-)
-
-func TestFilepathAbs_WithMockedOsGetwd(t *testing.T) {
-    rewire.Func(t, os.Getwd, func() (string, error) {
-        return "/mocked", nil
-    })
-
-    got, _ := filepath.Abs("foo")
-    // got == "/mocked/foo"
-}
-```
-
-`filepath.Abs` lives in `path/filepath`, it calls `os.Getwd` which lives in `os`, and neither package belongs to your project. Rewire rewrites `os.Getwd` at compile time so when `filepath.Abs` reaches the call site, it gets the mocked version. No interfaces, no dependency injection, no wrappers — and the mock is automatically restored after the test.
-
 ## About this project
 
 This project is 100% vibe coded — AST rewriting and compiler toolchains are way outside my comfort zone. Built entirely with [Claude Code](https://claude.ai).
