@@ -1,7 +1,6 @@
 package rewire
 
 import (
-	"sync"
 	"testing"
 	"time"
 )
@@ -20,7 +19,8 @@ const stubGreetName = "github.com/GiGurra/rewire/pkg/rewire.stubGreet"
 // fakeWrapper stands in for what a rewriter-generated wrapper
 // would look like on a FuncParallel-enabled target: check the
 // per-goroutine table first, fall back to the real implementation
-// if no mock is installed in this goroutine.
+// if no mock is installed for this goroutine (or any of its
+// ancestors — child goroutines inherit the parent's pprof labels).
 //
 // In a wired implementation the existing Mock_Foo nil check would
 // sit between these two branches. The prototype omits it because
@@ -47,11 +47,9 @@ func TestFuncParallel_DifferentGoroutinesDoNotInterfere(t *testing.T) {
 	// Two parallel subtests each install their own mock for the
 	// same target. Each subtest runs in its own goroutine (Go's
 	// testing runtime guarantees this for t.Run + Parallel), so
-	// their FuncParallel installations key on different goids and
-	// don't clobber each other. A small sleep inside each subtest
-	// ensures the windows overlap — without it, one subtest might
-	// complete before the other even installs its mock, which
-	// would trivially "pass" without testing the parallel case.
+	// their FuncParallel installations get distinct pprof labels
+	// pointers and don't clobber each other. A small sleep inside
+	// each subtest ensures the windows overlap.
 
 	t.Run("A", func(subT *testing.T) {
 		subT.Parallel()
@@ -76,43 +74,53 @@ func TestFuncParallel_DifferentGoroutinesDoNotInterfere(t *testing.T) {
 	})
 }
 
-func TestGo_CarriesMockToChild(t *testing.T) {
+// Key property of the pprof-labels approach: child goroutines
+// spawned with raw `go` inherit the parent's labels pointer
+// automatically (Go runtime behavior). That means they see the
+// parent's FuncParallel mocks without any explicit handoff helper.
+// This is the major ergonomic win over a goid-keyed approach.
+func TestFuncParallel_RawGoroutineInheritsMock(t *testing.T) {
 	FuncParallel(t, stubGreet, func(name string) string {
 		return "parent-mock:" + name
 	})
 
 	var childGot string
 	done := make(chan struct{})
-	Go(t, func() {
-		defer close(done)
-		childGot = fakeWrapper("child")
-	})
-	<-done
-
-	if childGot != "parent-mock:child" {
-		t.Errorf("child via rewire.Go got %q, want %q", childGot, "parent-mock:child")
-	}
-}
-
-// Complements TestGo_CarriesMockToChild: documents that raw `go`
-// deliberately does NOT inherit. A test author who forgets to use
-// rewire.Go in a parallel test will see unmocked behavior in the
-// child, which is the intended failure mode (visible, not silent).
-func TestFuncParallel_RawGoroutineDoesNotInherit(t *testing.T) {
-	FuncParallel(t, stubGreet, func(name string) string {
-		return "parent-mock:" + name
-	})
-
-	var rawGot string
-	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		rawGot = fakeWrapper("raw")
+		childGot = fakeWrapper("child")
 	}()
 	<-done
 
-	if rawGot != "real:raw" {
-		t.Errorf("raw goroutine got %q, want %q (raw go must not inherit parent mocks)", rawGot, "real:raw")
+	if childGot != "parent-mock:child" {
+		t.Errorf("child goroutine got %q, want %q (pprof label inheritance broken)", childGot, "parent-mock:child")
+	}
+}
+
+// Nested child goroutines should inherit transitively — a
+// grandchild spawned from a child spawned from the test should
+// still see the test's mock, because pprof labels propagate down
+// the full goroutine spawn tree.
+func TestFuncParallel_NestedChildrenInherit(t *testing.T) {
+	FuncParallel(t, stubGreet, func(name string) string {
+		return "root-mock:" + name
+	})
+
+	var grandchildGot string
+	done := make(chan struct{})
+	go func() {
+		nested := make(chan struct{})
+		go func() {
+			defer close(nested)
+			grandchildGot = fakeWrapper("grandchild")
+		}()
+		<-nested
+		close(done)
+	}()
+	<-done
+
+	if grandchildGot != "root-mock:grandchild" {
+		t.Errorf("grandchild got %q, want root-mock:grandchild", grandchildGot)
 	}
 }
 
@@ -126,40 +134,27 @@ func TestFuncParallel_CleanupRestoresAfterSubtest(t *testing.T) {
 		}
 	})
 
-	// After the subtest's t.Cleanup runs, the mock should be gone
-	// from this goroutine's table. Because t.Run re-uses the
-	// parent's goroutine (unlike Parallel subtests), the cleanup
-	// must have actually removed the entry rather than relying on
-	// goroutine termination.
+	// After the subtest's t.Cleanup runs, the mock entry should be
+	// removed from the per-goroutine table. Because t.Run re-uses
+	// the parent's goroutine (unlike Parallel subtests), the
+	// cleanup must have actually removed the entry rather than
+	// relying on goroutine termination.
 	if got := fakeWrapper("carol"); got != "real:carol" {
 		t.Errorf("after subtest got %q, want real:carol", got)
 	}
 }
 
-// Sanity check: currentGoid returns the same value within one
-// goroutine and different values across goroutines. If this ever
-// fails on a new Go release, the linkname access has broken and
-// the prototype can't distinguish goroutines.
-func TestRuntimeGoid_StableWithinGoroutineAndDistinctAcross(t *testing.T) {
-	first := currentGoid()
-	second := currentGoid()
+// Sanity: ensureGoroutineLabeled should return the same value
+// across calls within one goroutine (after the first call) and
+// different values across goroutines. This is the underlying
+// invariant that FuncParallel depends on.
+func TestEnsureGoroutineLabeled_StableWithinGoroutine(t *testing.T) {
+	first := ensureGoroutineLabeled()
+	second := ensureGoroutineLabeled()
 	if first != second {
-		t.Errorf("currentGoid not stable within one goroutine: %d then %d", first, second)
+		t.Errorf("ensureGoroutineLabeled not idempotent within one goroutine: %#x then %#x", first, second)
 	}
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-	var childGid int64
-	go func() {
-		defer wg.Done()
-		childGid = currentGoid()
-	}()
-	wg.Wait()
-
-	if childGid == 0 {
-		t.Errorf("childGid is zero — runtime.Stack or linkname likely broken")
-	}
-	if childGid == first {
-		t.Errorf("childGid (%d) equals parent gid (%d) — goroutines not distinguished", childGid, first)
+	if first == 0 {
+		t.Errorf("ensureGoroutineLabeled returned 0 — label install broken")
 	}
 }

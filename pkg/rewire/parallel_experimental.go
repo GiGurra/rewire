@@ -8,64 +8,97 @@ package rewire
 // mock a function through this path, something has to call
 // lookupParallelMock ahead of the normal Mock_Foo nil check.
 //
-// The tests in parallel_experimental_test.go exercise the runtime
-// via a stand-in wrapper, which is enough to demonstrate that
-// goroutine-local dispatch works, goroutines with different mocks
-// don't interfere, and the Go child-handoff carries mocks correctly.
+// Goroutine identification uses the pprof profile labels pointer as
+// a goroutine-unique key:
+//
+//   - Tests that install a FuncParallel mock push a unique pprof
+//     label onto the current goroutine. pprof labels are stored on
+//     the g struct, which gives us per-goroutine isolation.
+//   - Child goroutines inherit their parent's labels automatically
+//     (Go runtime behavior), so a child goroutine reads the same
+//     pointer as its parent test — it sees the parent's mocks
+//     "for free," no rewire.Go helper needed.
+//   - Reading the pointer without a context requires one linkname
+//     (runtime/pprof.runtime_getProfLabel). Go 1.23+ restricted
+//     direct pull from runtime.* symbols, but pprof's re-exported
+//     stub is reachable because runtime pushes the symbol out via
+//     its own go:linkname. Not a guaranteed-stable API — could be
+//     closed in a future Go release; fallback would be stack-walk
+//     (~1 μs per call, pure public API).
 //
 // See plans/parallel_test_safety_design.md for the full option
-// space, cost analysis, and explanation of why this API shape was
-// chosen over the alternatives considered.
+// space and pprof_label_probe_test.go for the gating tests that
+// proved the mechanism works on Go 1.26.2.
 
 import (
-	"bytes"
+	"context"
+	"fmt"
 	"reflect"
 	"runtime"
-	"strconv"
+	"runtime/pprof"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"unsafe"
+	_ "unsafe" // for go:linkname
 )
 
-// currentGoid returns the current goroutine's runtime-internal ID
-// by parsing the first line of runtime.Stack output (format:
-// "goroutine NNN [status]:\n..."). The ID is unique within a
-// process's lifetime and stable for the life of a goroutine, which
-// is all we need as a map key for per-goroutine state.
+// runtimeGetProfLabel returns the raw labels pointer stored on the
+// current goroutine's g struct. Nil if the goroutine has no labels
+// and is not a child of a goroutine that does.
 //
-// Stack parsing is ~1000× slower than a linkname lookup of
-// runtime.goid (microseconds vs nanoseconds), but Go 1.23+
-// restricted pull-side linkname access to private runtime symbols
-// including runtime.goid, so Stack parsing is the portable option.
-// A production-quality version of parallel mocking would want the
-// linkname speed; for a prototype the cost is well below the noise
-// floor of per-test overhead.
-func currentGoid() int64 {
-	var buf [64]byte
-	n := runtime.Stack(buf[:], false)
-	text := bytes.TrimPrefix(buf[:n], []byte("goroutine "))
-	if before, _, ok := bytes.Cut(text, []byte(" ")); ok {
-		id, _ := strconv.ParseInt(string(before), 10, 64)
-		return id
-	}
-	return 0
-}
+// Linkname target is runtime/pprof.runtime_getProfLabel rather than
+// runtime.getProfLabel: the former is reachable from third-party
+// code under Go 1.23+ rules (runtime pushes the symbol out, pprof's
+// stub becomes linker-visible), the latter is blocked by the
+// restriction on pulling runtime-internal symbols.
+//
+//go:linkname runtimeGetProfLabel runtime/pprof.runtime_getProfLabel
+func runtimeGetProfLabel() unsafe.Pointer
 
-// goroutineMocks is the prototype's central store: goid → *sync.Map
-// where each inner map is funcName → replacement-fn-as-any. Keyed
-// on goid because that's the finest-grained "current execution
-// context" Go exposes.
+// goroutineMocks maps goroutine-labels-pointer → *sync.Map (funcName
+// → replacement fn). The outer key is the pprof labels pointer,
+// which is stable for the life of a labeled goroutine and inherited
+// by child goroutines.
 //
-// Uses sync.Map for two reasons: (a) entries are rarely deleted
-// compared to reads, which matches sync.Map's intended workload,
-// and (b) the prototype avoids a package-level mutex on the hot
-// path.
+// Using uintptr for the key lets us compare pointers without the GC
+// needing to track them — pprof holds the labels alive via the g
+// struct, so we don't risk dangling references.
 var goroutineMocks sync.Map
 
+// nextParallelScopeID supplies unique IDs for the rewire.scope pprof
+// label so each test's goroutine gets distinct labels (and therefore
+// a distinct pointer to key on).
+var nextParallelScopeID atomic.Uint64
+
+// ensureGoroutineLabeled guarantees the current goroutine has a
+// pprof labels pointer set. If none is present (nil), it installs a
+// labels set with a unique rewire.scope value. Idempotent: if
+// labels are already present (installed by an earlier FuncParallel
+// call, by pprof.Do in user code, or inherited from a parent), this
+// is a no-op beyond the probe.
+//
+// Returns the current labels pointer as uintptr for use as a map
+// key.
+func ensureGoroutineLabeled() uintptr {
+	if ptr := runtimeGetProfLabel(); ptr != nil {
+		return uintptr(ptr)
+	}
+	id := nextParallelScopeID.Add(1)
+	ctx := pprof.WithLabels(
+		context.Background(),
+		pprof.Labels("rewire.scope", fmt.Sprintf("%d", id)),
+	)
+	pprof.SetGoroutineLabels(ctx)
+	return uintptr(runtimeGetProfLabel())
+}
+
 // FuncParallel installs a goroutine-local mock for target, scoped to
-// t's lifetime via t.Cleanup. The mock is visible only to calls
-// originating from t's goroutine (or goroutines spawned from it via
-// rewire.Go); goroutines spawned with the raw `go` keyword do NOT
-// see it.
+// t's lifetime via t.Cleanup. The mock is visible to calls
+// originating from t's goroutine AND to calls made from goroutines
+// spawned by t (directly or transitively, via raw `go`) — child
+// inheritance comes from pprof labels propagation in the Go
+// runtime.
 //
 // Use this inside t.Parallel() tests where two tests in the same
 // package want to mock the same target with different replacements
@@ -76,70 +109,38 @@ var goroutineMocks sync.Map
 func FuncParallel[F any](t *testing.T, target F, replacement F) {
 	t.Helper()
 	name := runtime.FuncForPC(reflect.ValueOf(target).Pointer()).Name()
-	gid := currentGoid()
+	key := ensureGoroutineLabeled()
 
-	rawTable, _ := goroutineMocks.LoadOrStore(gid, &sync.Map{})
+	rawTable, _ := goroutineMocks.LoadOrStore(key, &sync.Map{})
 	table := rawTable.(*sync.Map)
 	table.Store(name, replacement)
 
 	t.Cleanup(func() {
 		table.Delete(name)
-		// Intentionally do not delete the goid entry itself: the
-		// map may still carry other targets installed by the same
-		// test, and empty inner maps are cheap. They'll be
-		// reclaimed naturally when the goroutine terminates (via
-		// runtime GC pressure) or when a later test reuses the
-		// goid and overwrites the entry.
+		// Don't delete the goroutine's entire table entry — the
+		// test's goroutine may be reused for cleanup tasks and
+		// concurrent FuncParallel calls on other targets share the
+		// same key. The inner table's entries are cleared as their
+		// individual Cleanups fire; the outer map entry ends up
+		// pointing at an empty *sync.Map, which is cheap and
+		// reclaimed when the goroutine ends and a later run in the
+		// same g slot overwrites the key with a fresh table.
 	})
 }
 
-// Go spawns fn in a goroutine that inherits a snapshot of the
-// calling goroutine's FuncParallel mock table. Use instead of
-// `go fn()` inside a parallel test when the child goroutine needs
-// to see the parent's mocks.
-//
-// The child's mocks are cleared when fn returns. The parent's
-// table is unaffected — child edits don't propagate back.
-//
-// EXPERIMENTAL.
-func Go(t *testing.T, fn func()) {
-	t.Helper()
-	parentGid := currentGoid()
-	rawParent, hasParent := goroutineMocks.Load(parentGid)
-
-	go func() {
-		childGid := currentGoid()
-		if hasParent {
-			// Copy parent entries into a fresh child map. A shared
-			// reference would tangle the parent's Cleanup with the
-			// child's lifetime and make concurrent edits between
-			// parent and child visible to each other — not what
-			// per-goroutine isolation means.
-			child := &sync.Map{}
-			rawParent.(*sync.Map).Range(func(k, v any) bool {
-				child.Store(k, v)
-				return true
-			})
-			goroutineMocks.Store(childGid, child)
-			defer goroutineMocks.Delete(childGid)
-		}
-		fn()
-	}()
-}
-
 // lookupParallelMock returns the replacement function installed via
-// FuncParallel for the current goroutine's target, or (nil, false)
-// if none. This is the hook a rewriter-generated wrapper would call
-// ahead of the existing Mock_Foo nil check on parallel-enabled
-// targets.
-//
-// Exported from the package so the prototype's stand-in wrapper can
-// exercise it; in a wired implementation the rewriter would emit
-// the same call site.
+// FuncParallel that's visible to the current goroutine, or
+// (nil, false) if none. This is the hook a rewriter-generated
+// wrapper would call ahead of the existing Mock_Foo nil check on
+// parallel-enabled targets.
 //
 // EXPERIMENTAL.
 func lookupParallelMock(name string) (any, bool) {
-	rawTable, ok := goroutineMocks.Load(currentGoid())
+	ptr := runtimeGetProfLabel()
+	if ptr == nil {
+		return nil, false
+	}
+	rawTable, ok := goroutineMocks.Load(uintptr(ptr))
 	if !ok {
 		return nil, false
 	}

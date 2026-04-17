@@ -3,6 +3,97 @@
 > Status: design exploration, not a committed roadmap item. Captures
 > the option space so a future implementation doesn't start from a
 > blank page. Companion prototype lives in a separate draft PR.
+>
+> **Update 2026-04-17**: the mechanism that actually works is
+> described in "pprof labels as goroutine identity" below. The
+> original options-A-through-E analysis further down this doc is
+> preserved for context but superseded.
+
+## pprof labels as goroutine identity (2026-04-17)
+
+The initial exploration assumed goroutine identification required
+goid access, which is blocked in Go 1.23+ either via linkname
+(`runtime.goid` not on the push-out list) or via cheap public API
+(none exists). This drove the design toward either slow Stack
+parsing or a `rewire.Go(t, fn)` helper for child-goroutine handoff,
+both of which are poor.
+
+It turns out there's a cleaner mechanism hiding in `runtime/pprof`:
+
+- **pprof profile labels are stored on the g struct**, set via
+  public `pprof.SetGoroutineLabels(ctx)`.
+- **Child goroutines inherit parent's labels automatically** — this
+  is Go runtime behavior, not something we have to implement.
+- **The labels pointer is a unique per-goroutine-tree identifier**:
+  two goroutines with independently-installed labels have different
+  pointer values; a child inherits the parent's exact pointer value.
+- **Reading the pointer without a context is reachable from
+  third-party code** via `//go:linkname runtime/pprof.runtime_getProfLabel`.
+  Runtime pushes `getProfLabel` out to pprof via its own go:linkname,
+  making pprof's stub a real linker-visible symbol. Pulling from
+  pprof is not blocked by Go 1.23's restriction the way pulling
+  from runtime directly is.
+
+### The resulting design
+
+```go
+// Install (from FuncParallel):
+ensureGoroutineLabeled()            // pprof.SetGoroutineLabels with unique scope
+ptr := runtimeGetProfLabel()        // uintptr as map key
+goroutineMocks[ptr][funcName] = replacement
+
+// Dispatch (from rewriter-generated wrapper):
+ptr := runtimeGetProfLabel()
+if table := goroutineMocks[ptr]; table != nil {
+    if mock := table[funcName]; mock != nil { return mock(args) }
+}
+// fall through to existing Mock_Foo / _real_Foo
+```
+
+### What this gets us over the goid approach
+
+- **No rewire.Go helper.** Children of a parallel test see the
+  parent's mocks automatically. This was the main ergonomic issue
+  with every goid-based design.
+- **No Stack parsing**, no assembly, no fragile runtime-internal
+  access. The only unsanctioned piece is one linkname through pprof,
+  and it's documented as a reachable symbol.
+- **Cost: ~20–50 ns per call on flagged targets.** Linkname function
+  call (~5 ns) + sync.Map.Load (~30 ns) + nil/key check. Comparable
+  to the goid+sync.Map cost, minus the goid-lookup tax.
+
+### Risks and caveats
+
+- **Linkname-through-pprof loophole could close.** Go 1.27+ could
+  tighten rules further to require both sides explicitly allow the
+  linkname. If that happens, fallback options:
+  - Stack-walk for owning test PC (~1 μs when active, pure public API)
+  - `petermattis/goid`-style assembly (~5 ns, architecture-specific)
+- **Label collisions with user pprof profiling.** If a user calls
+  `pprof.Do` after `FuncParallel`, the labels pointer changes and
+  previously-installed mocks become unreachable. Documented as "don't
+  mix FuncParallel with user pprof.Do in the same goroutine." In
+  practice a rare combination.
+- **Single-linkname exposure surface.** If the pprof stub ever
+  changes name or signature, our linkname breaks loudly at build
+  time. Recoverable with a version-conditional shim, not silent.
+
+### Prototype status
+
+The pkg/rewire/parallel_experimental.go implementation is now built
+on pprof labels. The four tests in pprof_label_probe_test.go verify
+the underlying mechanism (linkname works, SetGoroutineLabels updates
+what we read, children inherit, two goroutines get distinct
+pointers). The tests in parallel_experimental_test.go verify the
+rewire-level properties built on top (mock install, parallel subtest
+isolation, raw-`go` child inheritance, nested-child inheritance,
+subtest cleanup).
+
+Still not wired into the rewriter — that's the follow-up work.
+
+---
+
+## Original options analysis (superseded by section above)
 
 ## Current state
 
