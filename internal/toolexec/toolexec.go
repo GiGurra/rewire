@@ -31,24 +31,29 @@ func Run(args []string) int {
 		return 1
 	}
 
-	tool := args[0]
-	toolArgs := args[1:]
+	_, chain, tool, toolArgs, ok := parseChain(args)
+	if !ok {
+		fmt.Fprintln(os.Stderr, "rewire toolexec: --and-then present but no Go tool found in remaining args")
+		return 1
+	}
 
 	// Fast path for anything that isn't a compile invocation, or
 	// that is but doesn't give us enough context to act on. All of
 	// these paths have ZERO cleanup work, so we can use syscall.Exec
 	// to replace the rewire process with the target tool directly —
-	// saving ~10 ms of fork+wait overhead per invocation.
+	// saving ~10 ms of fork+wait overhead per invocation. When a
+	// --and-then chain is active, execToolReplaceChained prepends the
+	// successor command so the tool is routed through it.
 	if !isCompileTool(tool) {
-		return execToolReplace(tool, toolArgs)
+		return execToolReplaceChained(chain, tool, toolArgs)
 	}
 	pkgPath := findFlag(toolArgs, "-p")
 	if pkgPath == "" {
-		return execToolReplace(tool, toolArgs)
+		return execToolReplaceChained(chain, tool, toolArgs)
 	}
 	_, moduleRoot := findModuleInfo()
 	if moduleRoot == "" {
-		return execToolReplace(tool, toolArgs)
+		return execToolReplaceChained(chain, tool, toolArgs)
 	}
 
 	if profileEnabled.Load() {
@@ -90,7 +95,7 @@ func Run(args []string) int {
 	// in-flight compile-wrap profile defer is unreachable after
 	// syscall.Exec, so we end it manually here.
 	if len(funcsToMock) == 0 && !isTest {
-		return execToolReplace(tool, toolArgs)
+		return execToolReplaceChained(chain, tool, toolArgs)
 	}
 
 	// For test compilations: check if the mock target set changed
@@ -118,7 +123,7 @@ func Run(args []string) int {
 	// Rewrite path uses execTool (fork+wait) because cleanup() needs
 	// to run after the compile finishes to remove temp files. If we
 	// syscall.Exec'd here, the temp files would leak.
-	return execTool(tool, rewrittenArgs)
+	return execToolChained(chain, tool, rewrittenArgs)
 }
 
 func isCompileTool(tool string) bool {
