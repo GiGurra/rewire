@@ -1,0 +1,35 @@
+version: '3'
+
+vars:
+  REWIRE_GOCACHE: '{{.HOME}}/.cache/rewire-test'
+
+tasks:
+  build:
+    desc: Build all packages
+    cmds:
+      - go build ./...
+
+  install:
+    desc: Install the rewire binary (required before running tests with toolexec)
+    cmds:
+      - go install ./cmd/rewire/
+
+  test:
+    desc: Run all tests with toolexec and a separate GOCACHE
+    deps: [install]
+    env:
+      GOFLAGS: -toolexec=rewire
+      GOCACHE: '{{.REWIRE_GOCACHE}}'
+    cmds:
+      - go test ./...
+
+  test:unit:
+    desc: Run unit tests that don't need toolexec (rewriter, mockgen)
+    cmds:
+      - go test ./internal/rewriter/ ./internal/mockgen/
+
+  clean:
+    desc: Remove build artifacts and the rewire-specific test cache
+    cmds:
+      - go clean ./...
+      - rm -rf {{.REWIRE_GOCACHE}}
