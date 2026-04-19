@@ -30,6 +30,108 @@ func Hello(name string) string {
 	assertContains(t, result, `"hello " + name`)
 }
 
+// When ImportPath is set, the wrapper gets a goroutine-local
+// dispatch head ahead of the Mock_Foo nil check. The head reads
+// the pprof labels pointer for the current goroutine and does a
+// lookup in a per-function sync.Map (Mock_Foo_ByGoroutine) also
+// emitted by the rewriter. The linkname stub for
+// _rewire_getProfLabel lives in a sidecar file written by the
+// toolexec layer, not by the rewriter itself.
+func TestRewriteSourceOpts_WithImportPath_EmitsGoroutineLocalHead(t *testing.T) {
+	src := []byte(`package bar
+
+func Hello(name string) string {
+	return "hello " + name
+}
+`)
+	out, err := RewriteSourceOpts(src, "Hello", RewriteOptions{
+		ImportPath: "github.com/example/bar",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := string(out)
+	t.Log("Rewritten source:\n" + result)
+
+	assertParsesAsGo(t, result)
+	// Per-function goroutine-keyed sync.Map is declared.
+	assertContains(t, result, "var Mock_Hello_ByGoroutine sync.Map")
+	// Wrapper reads the labels pointer and looks up in that map.
+	assertContains(t, result, `_rewire_labels := _rewire_getProfLabel()`)
+	assertContains(t, result, `Mock_Hello_ByGoroutine.Load(uintptr(_rewire_labels))`)
+	assertContains(t, result, `_rewire_raw.(func(name string) string)`)
+	// Rewriter adds sync import (not unsafe — unsafe lives in the sidecar).
+	assertContains(t, result, `"sync"`)
+	assertNotContains(t, result, `"unsafe"`)
+	// Mock_Foo fallback remains for the legacy path.
+	assertContains(t, result, `Mock_Hello`)
+	assertContains(t, result, `_real_Hello`)
+}
+
+// Pointer-receiver method: Mock_Type_Method_ByGoroutine is emitted.
+func TestRewriteSourceOpts_WithImportPath_PointerMethod(t *testing.T) {
+	src := []byte(`package bar
+
+type Server struct{}
+
+func (s *Server) Handle(req string) string {
+	return "handled " + req
+}
+`)
+	out, err := RewriteSourceOpts(src, "(*Server).Handle", RewriteOptions{
+		ImportPath: "github.com/example/bar",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+	assertParsesAsGo(t, result)
+	assertContains(t, result, "var Mock_Server_Handle_ByGoroutine sync.Map")
+	assertContains(t, result, `Mock_Server_Handle_ByGoroutine.Load(uintptr(_rewire_labels))`)
+}
+
+// Value-receiver method.
+func TestRewriteSourceOpts_WithImportPath_ValueMethod(t *testing.T) {
+	src := []byte(`package bar
+
+type Greeter struct{}
+
+func (g Greeter) Greet(name string) string {
+	return "hi " + name
+}
+`)
+	out, err := RewriteSourceOpts(src, "Greeter.Greet", RewriteOptions{
+		ImportPath: "github.com/example/bar",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+	assertParsesAsGo(t, result)
+	assertContains(t, result, "var Mock_Greeter_Greet_ByGoroutine sync.Map")
+	assertContains(t, result, `Mock_Greeter_Greet_ByGoroutine.Load(uintptr(_rewire_labels))`)
+}
+
+// Without ImportPath, the wrapper keeps the old Mock_Foo-only shape.
+func TestRewriteSourceOpts_NoImportPath_KeepsLegacyShape(t *testing.T) {
+	src := []byte(`package bar
+
+func Hello(name string) string {
+	return "hello " + name
+}
+`)
+	out, err := RewriteSourceOpts(src, "Hello", RewriteOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(out)
+	assertParsesAsGo(t, result)
+	assertNotContains(t, result, "_rewire_getProfLabel")
+	assertNotContains(t, result, "_ByGoroutine")
+	assertContains(t, result, "Mock_Hello")
+}
+
 func TestRewriteSource_NoReturn(t *testing.T) {
 	src := []byte(`package bar
 

@@ -24,6 +24,15 @@ type RewriteOptions struct {
 	// methods on generic types). Rejected with a clear error for free
 	// functions, value-receiver methods, and plain generic functions.
 	ByInstance bool
+
+	// ImportPath is the fully-qualified import path of the package
+	// being rewritten (e.g. "github.com/example/bar"). Used to build
+	// the goroutine-local mock lookup key and to emit the correct
+	// import alias for the rewire runtime. If empty, the
+	// parallel-safe goroutine-local dispatch is omitted from the
+	// wrapper — the resulting wrapper keeps only the legacy
+	// Mock_Foo nil-check path.
+	ImportPath string
 }
 
 // RewriteSource takes Go source code and a function name, and returns
@@ -238,13 +247,60 @@ func RewriteSourceOpts(src []byte, funcName string, opts RewriteOptions) ([]byte
 	`, byInstanceVarName, recvName, mockVarType, mockCallArgs)
 		}
 	}
+	// Goroutine-local dispatch head, inserted ahead of the Mock_Foo
+	// nil check when we have an ImportPath. This is the parallel-
+	// safe path: it consults a per-function sync.Map keyed on the
+	// current goroutine's pprof labels pointer, which gives
+	// t.Parallel() tests their own mock without racing on the
+	// shared Mock_Foo variable. The Mock_Foo nil check remains as
+	// a fallback.
+	//
+	// Each mocked function gets its own Mock_Foo_ByGoroutine
+	// sync.Map declared in the rewritten source — no cross-package
+	// state. The only cross-package reach is _rewire_getProfLabel,
+	// declared via //go:linkname in a sidecar file. That linkname
+	// targets runtime/pprof, which is on the allowlist (runtime
+	// pushes the symbol out to pprof).
+	goroutineLocalMapName := mockVarName + "_ByGoroutine"
+	goroutineLocalHead := ""
+	if opts.ImportPath != "" {
+		if hasResults {
+			goroutineLocalHead = fmt.Sprintf(`if _rewire_labels := _rewire_getProfLabel(); _rewire_labels != nil {
+		if _rewire_raw, _rewire_ok := %s.Load(uintptr(_rewire_labels)); _rewire_ok {
+			if _rewire_typed, _rewire_ok := _rewire_raw.(%s); _rewire_ok {
+				return _rewire_typed(%s)
+			}
+		}
+	}
+	`, goroutineLocalMapName, mockVarType, mockCallArgs)
+		} else {
+			goroutineLocalHead = fmt.Sprintf(`if _rewire_labels := _rewire_getProfLabel(); _rewire_labels != nil {
+		if _rewire_raw, _rewire_ok := %s.Load(uintptr(_rewire_labels)); _rewire_ok {
+			if _rewire_typed, _rewire_ok := _rewire_raw.(%s); _rewire_ok {
+				_rewire_typed(%s)
+				return
+			}
+		}
+	}
+	`, goroutineLocalMapName, mockVarType, mockCallArgs)
+		}
+	}
+
+	// Dispatch order (most specific first):
+	//   1. byInstanceHead (InstanceFunc) — per-receiver override
+	//   2. goroutineLocalHead (Func in parallel tests) — per-goroutine-tree override
+	//   3. Mock_Foo nil check (Func legacy path) — global mock
+	//   4. real implementation
+	// Swapping (2) and (3) would reintroduce the parallel-test race
+	// on Mock_Foo. Swapping (1) and (2) would let a rewire.Func
+	// call stomp on an InstanceFunc's more-specific mock.
 	if hasResults {
-		mockBody = byInstanceHead + fmt.Sprintf(`if _rewire_mock := %s; _rewire_mock != nil {
+		mockBody = byInstanceHead + goroutineLocalHead + fmt.Sprintf(`if _rewire_mock := %s; _rewire_mock != nil {
 		return _rewire_mock(%s)
 	}
 	return %s`, mockVarName, mockCallArgs, realCallExpr)
 	} else {
-		mockBody = byInstanceHead + fmt.Sprintf(`if _rewire_mock := %s; _rewire_mock != nil {
+		mockBody = byInstanceHead + goroutineLocalHead + fmt.Sprintf(`if _rewire_mock := %s; _rewire_mock != nil {
 		_rewire_mock(%s)
 		return
 	}
@@ -277,22 +333,28 @@ func RewriteSourceOpts(src []byte, funcName string, opts RewriteOptions) ([]byte
 		realAliasRHS = realFuncName
 	}
 
-	// Generate mock var + (optional) by-instance sync.Map + real alias +
-	// wrapper as source text, then parse to AST.
+	// Generate mock var + (optional) by-instance sync.Map + (optional)
+	// by-goroutine sync.Map + real alias + wrapper as source text,
+	// then parse to AST.
 	byInstanceDeclSrc := ""
 	if opts.ByInstance {
 		byInstanceDeclSrc = fmt.Sprintf("\nvar %s sync.Map\n", byInstanceVarName)
 	}
+	byGoroutineDeclSrc := ""
+	if opts.ImportPath != "" {
+		byGoroutineDeclSrc = fmt.Sprintf("\nvar %s sync.Map\n", goroutineLocalMapName)
+	}
+
 	genSrc := fmt.Sprintf(`package %s
 
 var %s %s
-%s
+%s%s
 var %s = %s
 
 func %s%s(%s) %s {
 	%s
 }
-`, file.Name.Name, mockVarName, mockVarType, byInstanceDeclSrc, realVarName, realAliasRHS, recvDecl, wrapperName, paramsSrc, resultsSrc, mockBody)
+`, file.Name.Name, mockVarName, mockVarType, byInstanceDeclSrc, byGoroutineDeclSrc, realVarName, realAliasRHS, recvDecl, wrapperName, paramsSrc, resultsSrc, mockBody)
 
 	genFset := token.NewFileSet()
 	genFile, err := parser.ParseFile(genFset, "", genSrc, parser.ParseComments)
@@ -320,10 +382,10 @@ func %s%s(%s) %s {
 	newDecls = append(newDecls, file.Decls[targetIdx+1:]...)
 	file.Decls = newDecls
 
-	// When ByInstance is set, the generated wrapper references sync.Map,
-	// so the target file must import "sync" even if the original source
-	// didn't.
-	if opts.ByInstance {
+	// When ByInstance OR ImportPath (goroutine-local dispatch) is set,
+	// the generated wrapper references sync.Map, so the target file
+	// must import "sync" even if the original source didn't.
+	if opts.ByInstance || opts.ImportPath != "" {
 		ensureImport(file, "sync")
 	}
 
@@ -792,16 +854,37 @@ func clearNodePositions(n ast.Node) {
 // present. Uses position-cleared AST nodes so the surrounding import
 // block formats cleanly regardless of the parent file's fset state.
 func ensureImport(file *ast.File, pkgPath string) {
+	ensureImportWithAlias(file, pkgPath, "")
+}
+
+// ensureImportWithAlias adds an aliased import of pkgPath to file if
+// it is not already present under the same alias. Passing alias=""
+// is equivalent to ensureImport.
+func ensureImportWithAlias(file *ast.File, pkgPath, alias string) {
 	for _, imp := range file.Imports {
-		if strings.Trim(imp.Path.Value, `"`) == pkgPath {
+		if strings.Trim(imp.Path.Value, `"`) != pkgPath {
+			continue
+		}
+		existingAlias := ""
+		if imp.Name != nil {
+			existingAlias = imp.Name.Name
+		}
+		if existingAlias == alias {
 			return
 		}
+		// Import is present under a different name. Leave it alone
+		// — adding a second alias would be surprising. The caller
+		// is expected not to set up colliding configurations.
+		return
 	}
 	newSpec := &ast.ImportSpec{
 		Path: &ast.BasicLit{
 			Kind:  token.STRING,
 			Value: fmt.Sprintf("%q", pkgPath),
 		},
+	}
+	if alias != "" {
+		newSpec.Name = ast.NewIdent(alias)
 	}
 	clearNodePositions(newSpec)
 

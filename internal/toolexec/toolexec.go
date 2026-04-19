@@ -202,7 +202,10 @@ func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, pkg
 
 			rewritten := src
 			for _, fn := range funcsToMock {
-				opts := rewriter.RewriteOptions{ByInstance: pkgByInstance[fn]}
+				opts := rewriter.RewriteOptions{
+					ByInstance: pkgByInstance[fn],
+					ImportPath: pkgPath,
+				}
 				result, err := rewriter.RewriteSourceOpts(rewritten, fn, opts)
 				if err != nil {
 					if strings.Contains(err.Error(), "not found") {
@@ -242,19 +245,55 @@ func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, pkg
 			}
 		}
 
+		// When any function was rewritten with ImportPath set, the
+		// wrappers reference _rewire_getProfLabel to read the
+		// current goroutine's pprof labels pointer (used as the
+		// goroutine-tree identity key). The linkname to
+		// runtime/pprof.runtime_getProfLabel lives in a sidecar
+		// file written once per package. Each mocked function has
+		// its own Mock_Foo_ByGoroutine sync.Map in the rewritten
+		// file; the sidecar only hosts the linkname stub so the
+		// wrappers have something to call.
+		//
+		// Emitting inline per-wrapper was tried first; it caused
+		// duplicate declarations across multiple functions in the
+		// same package, and comment attachment through the AST
+		// splice was brittle. A sidecar sidesteps both issues.
+		if len(rewrittenFuncs) > 0 {
+			pkgName, err := readPackageNameFromArgs(newArgs)
+			if err != nil {
+				cleanup()
+				return nil, nil, fmt.Errorf("determining package name for linkname sidecar: %w", err)
+			}
+			sidecar := fmt.Sprintf(`package %s
+
+import "unsafe"
+
+//go:linkname _rewire_getProfLabel runtime/pprof.runtime_getProfLabel
+func _rewire_getProfLabel() unsafe.Pointer
+`, pkgName)
+			sidecarPath := filepath.Join(tmpDir, "_rewire_linkname.go")
+			if err := os.WriteFile(sidecarPath, []byte(sidecar), 0644); err != nil {
+				cleanup()
+				return nil, nil, fmt.Errorf("writing linkname sidecar: %w", err)
+			}
+			newArgs = append(newArgs, sidecarPath)
+		}
+
 		// If any rewritten function is generic, the rewriter added imports
 		// for reflect and sync. If any rewritten function was rewritten with
 		// ByInstance=true (non-generic method case), the rewriter also added
 		// an import for sync. Both cases need those packages reachable via
 		// -importcfg even if the original source didn't import them.
 		needsReflect := false
-		needsSync := false
+		// The rewriter always adds a sync.Map for goroutine-local
+		// dispatch when ImportPath is set (which it always is in
+		// the toolexec compile path), so sync is needed as soon as
+		// anything was rewritten.
+		needsSync := len(rewrittenFuncs) > 0
 		for _, fn := range funcsToMock {
 			if isGenericFunc(pkgPath, fn) {
 				needsReflect = true
-				needsSync = true
-			}
-			if pkgByInstance[fn] {
 				needsSync = true
 			}
 		}
@@ -647,6 +686,40 @@ func readInterfaceSource(pkgDir, ifaceName string) ([]byte, error) {
 	return nil, fmt.Errorf("interface %s not found in package directory %s", ifaceName, pkgDir)
 }
 
+// readPackageNameFromArgs finds the first .go source file in the
+// compile args and returns its package name. Used to generate
+// sidecar files in the same package as the rewritten source.
+func readPackageNameFromArgs(args []string) (string, error) {
+	for _, arg := range args {
+		if !strings.HasSuffix(arg, ".go") {
+			continue
+		}
+		data, err := os.ReadFile(arg)
+		if err != nil {
+			continue
+		}
+		// Skip over comments and blank lines to find "package X".
+		// A full parser is overkill for a one-line header read.
+		for _, line := range strings.Split(string(data), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" || strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") {
+				continue
+			}
+			if rest, ok := strings.CutPrefix(trimmed, "package "); ok {
+				name := strings.TrimSpace(rest)
+				if idx := strings.IndexAny(name, " \t/"); idx >= 0 {
+					name = name[:idx]
+				}
+				if name != "" {
+					return name, nil
+				}
+			}
+			break
+		}
+	}
+	return "", fmt.Errorf("no package declaration found in any of %d args", len(args))
+}
+
 // defaultPkgAlias returns the default Go local name for an import path
 // (its last path segment).
 func defaultPkgAlias(path string) string {
@@ -753,6 +826,19 @@ func generateRegistration(compileArgs []string, targets mockTargets, instantiati
 		for _, fn := range e.funcNames {
 			fmt.Fprintf(&b, "\trewire.Register(%q, &%s.%s)\n",
 				e.importPath+"."+fn, e.alias, mockVarName(fn))
+
+			// Register the per-function goroutine-keyed map used by
+			// the parallel-safe dispatch path. The rewriter emits
+			// Mock_Foo_ByGoroutine alongside Mock_Foo for every
+			// rewritten target (non-generic path only, since
+			// ImportPath-driven emission doesn't hit the generic
+			// rewriter branches today). Generic functions skip —
+			// their dispatch is via sync.Map keyed on type
+			// signature, a different parallelism story.
+			if !isGenericFunc(e.importPath, fn) {
+				fmt.Fprintf(&b, "\trewire.RegisterGoroutineMap(%q, &%s.%s_ByGoroutine)\n",
+					e.importPath+"."+fn, e.alias, mockVarName(fn))
+			}
 
 			if isGenericFunc(e.importPath, fn) {
 				// Generic: emit one RegisterReal call per unique
