@@ -76,7 +76,13 @@ func main() {
 	// tool. Dispatch there immediately, before any CLI flag
 	// parsing — this is by far the hot path and we want it to
 	// start as fast as possible.
-	if len(os.Args) >= 2 && filepath.IsAbs(os.Args[1]) {
+	//
+	// Chain mode: when invoked as one link in an --and-then chain
+	// (e.g. `-toolexec="rewire --and-then proven"`), argv[1] is
+	// `--and-then` or another chain token rather than an absolute
+	// path. We recognize the chain marker and hand off to the
+	// toolexec runner, which parses the chain structure itself.
+	if len(os.Args) >= 2 && (filepath.IsAbs(os.Args[1]) || toolexec.HasAndThen(os.Args[1:])) {
 		os.Exit(toolexec.Run(os.Args[1:]))
 	}
 
