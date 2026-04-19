@@ -141,12 +141,7 @@ func findGoToolIndex(args []string) int {
 // chain link. cmd/rewire/main.go uses this to decide between CLI
 // mode and toolexec mode when argv[1] is not an absolute path.
 func HasAndThen(args []string) bool {
-	for _, a := range args {
-		if a == "--and-then" {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(args, "--and-then")
 }
 
 // execToolChained is the chain-aware analogue of execTool: when the
