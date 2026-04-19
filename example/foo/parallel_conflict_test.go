@@ -149,7 +149,7 @@ func TestParallelConflict_EndToEnd(t *testing.T) {
 			rewire.Func(st, bar.TinyAdd, func(a, b int) int { return ret })
 			// Reached only if claimOwnership didn't Fatal.
 			installsCompleted.Add(1)
-			time.Sleep(1500 * time.Millisecond)
+			time.Sleep(1 * time.Second)
 		}
 		t.Run("installer-A", func(st *testing.T) {
 			st.Parallel()

@@ -16,7 +16,7 @@ Parallel tests in the same package cannot mock the **same target** with differen
 
 Rewire **detects this at install time**. If a second test calls `rewire.Func` / `rewire.InstanceFunc` on a target another live test already mocks, it fails via `t.Fatalf` with a diagnostic that names the conflicting test and suggests fixes:
 
-```
+```text
 rewire: cannot install mock for pkg.Foo — already mocked by test "TestOther".
   Two different tests tried to install a mock on the same target concurrently.
   rewire.Func / rewire.InstanceFunc are not parallel-safe for the same target:

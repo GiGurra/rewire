@@ -356,9 +356,10 @@ func RestoreInstance[I any](t *testing.T, instance I) {
 	restoreInstanceAll(instance)
 
 	// Release any per-instance ownership entries this test holds for this
-	// instance. Per-instance keys are name|typeSig|ptr, so we scan the
-	// owner registry and drop entries whose key ends with our instance's
-	// address and whose owner is this test.
+	// instance. Per-instance keys are `inst|name|typeSig|ptr` (see
+	// instanceOwnerKey), so we scan the owner registry for entries that
+	// both carry that prefix and end with this instance's address, and
+	// drop the ones this test owns.
 	v := reflect.ValueOf(instance)
 	if v.Kind() != reflect.Pointer || v.IsNil() {
 		return
@@ -366,7 +367,7 @@ func RestoreInstance[I any](t *testing.T, instance I) {
 	suffix := fmt.Sprintf("|%#x", v.Pointer())
 	ownerRegistry.Range(func(k, val any) bool {
 		key, _ := k.(string)
-		if !strings.HasSuffix(key, suffix) {
+		if !strings.HasPrefix(key, instanceOwnerKeyPrefix) || !strings.HasSuffix(key, suffix) {
 			return true
 		}
 		owner, _ := val.(*testing.T)
@@ -434,7 +435,7 @@ func InstanceFunc[I any, F any](t *testing.T, instance I, original F, replacemen
 	// receivers don't trip the check — that's a legitimate use case.
 	claimOwnership(
 		t,
-		fmt.Sprintf("%s|%s|%#x", name, reflect.TypeFor[F]().String(), instVal.Pointer()),
+		instanceOwnerKey(name, reflect.TypeFor[F]().String(), instVal.Pointer()),
 		fmt.Sprintf("%s on instance 0x%x", name, instVal.Pointer()),
 	)
 
@@ -472,8 +473,23 @@ func RestoreInstanceFunc[I any, F any](t *testing.T, instance I, original F) {
 	if v.Kind() != reflect.Pointer || v.IsNil() {
 		return
 	}
-	releaseOwnership(t, fmt.Sprintf("%s|%s|%#x", funcName(original), reflect.TypeFor[F]().String(), v.Pointer()))
+	releaseOwnership(t, instanceOwnerKey(funcName(original), reflect.TypeFor[F]().String(), v.Pointer()))
 }
+
+// instanceOwnerKey composes the ownership-registry key for a per-instance
+// method mock. The literal "inst|" prefix distinguishes these keys from
+// global Func keys (which are plain `name|typeSig`), so RestoreInstance's
+// Range-based scan can safely isolate them without depending on a
+// reflect-type-string never containing a "|0x…" tail. If the Func key
+// format ever changes, this prefix remains the explicit marker.
+func instanceOwnerKey(name, typeSig string, instancePtr uintptr) string {
+	return fmt.Sprintf("inst|%s|%s|%#x", name, typeSig, instancePtr)
+}
+
+// instanceOwnerKeyPrefix returns the prefix every per-instance ownership
+// key begins with. Used by RestoreInstance to scope its Range-based scan
+// to per-instance entries only.
+const instanceOwnerKeyPrefix = "inst|"
 
 // restoreInstanceAll clears every per-instance mock scoped to instance
 // across every registered per-method table. Called by RestoreInstance.
@@ -595,8 +611,9 @@ func claimOwnership(t *testing.T, key, targetDescription string) {
 		t.Cleanup(func() { ownerRegistry.CompareAndDelete(key, t) })
 		return
 	}
-	if existingOwner == nil || existingOwner == t {
-		// Same test, already owns this target — allow reinstall.
+	if existingOwner == nil {
+		// tryClaimOwnership returns (nil, false) when t is the current
+		// owner — allow reinstalls from the same test.
 		return
 	}
 	t.Fatal(ownershipConflictMsg(targetDescription, existingOwner.Name()))
