@@ -10,16 +10,62 @@ Functions like `math.Abs`, `math.Sqrt`, and `math.Floor` are replaced with CPU i
 
 Rewire detects these automatically and fails with a clear error message. Use non-intrinsic alternatives where possible (e.g., `math.Pow` works fine).
 
-## No parallel mock safety
+## No parallel mock safety (but conflicts are detected)
 
-Parallel tests in the same package should not mock the **same function** with different replacements. The mock variable is shared, so two parallel tests setting it will race.
+Parallel tests in the same package cannot mock the **same target** with different replacements — the mock variable is shared, so two parallel installs would race.
 
-Two parallel tests mocking **different** functions is fine — there's no contention.
+Rewire **detects this at install time**. If a second test calls `rewire.Func` / `rewire.InstanceFunc` on a target another live test already mocks, it fails via `t.Fatalf` with a diagnostic that names the conflicting test and suggests fixes:
+
+```text
+rewire: cannot install mock for pkg.Foo — already mocked by test "TestOther".
+  Two different tests tried to install a mock on the same target concurrently.
+  rewire.Func / rewire.InstanceFunc are not parallel-safe for the same target:
+  a single shared mock variable backs every call site, so overlapping installs
+  would race silently on that variable.
+  Fixes:
+    - Remove t.Parallel() from one of the tests, or
+    - Mock a different target in each parallel test, or
+    - Use rewire.InstanceFunc on separate receivers so each test owns its own scope.
+```
+
+What is **not** a conflict:
+
+- Two parallel tests mocking **different** targets.
+- Two parallel tests mocking the **same method on different receivers** via `rewire.InstanceFunc` — ownership is scoped per receiver address, so each test owns its own scope.
+- A single test **reinstalling** a mock on a target it already owns (e.g., `rewire.Func(t, foo, mockA); rewire.Func(t, foo, mockB)` in the same test).
+
+Ownership is released automatically when the owning test ends (via `t.Cleanup`). `rewire.RestoreFunc`, `rewire.RestoreInstance`, and `rewire.RestoreInstanceFunc` also release ownership eagerly, so a test that mocks and then restores mid-run frees the target for a concurrent test to claim.
 
 !!! note
-    This only matters for tests using `t.Parallel()`. Sequential tests (the default) don't have this issue since `t.Cleanup` restores the original between tests.
+    This only triggers for tests using `t.Parallel()` or otherwise running concurrently. Sequential tests (the default) take and release ownership cleanly between tests.
 
-**Investigated — not shipped.** A working end-to-end prototype exists on a draft PR: [#6 — Parallel-safe `rewire.Func` via goroutine-inherited pprof labels](https://github.com/GiGurra/rewire/pull/6). It replaces the shared `Mock_Foo` variable with a per-goroutine-tree dispatch table keyed on a `runtime/pprof` labels pointer, so parallel tests each see their own mock and child goroutines inherit automatically. Held back from merging because it relies on an unofficial linkname loophole and the new wrapper shape is too complex for Go's inliner to absorb (a real regression on the "rewire is free when not mocked" property). See [`plans/parallel_test_safety_findings.md`](https://github.com/GiGurra/rewire/blob/main/plans/parallel_test_safety_findings.md) for the full write-up of what was learned.
+### What detection cannot catch: mocker vs. non-mocker in parallel
+
+The conflict detector only fires when **two tests call a rewire function** (`rewire.Func` / `rewire.InstanceFunc`) on the same target concurrently. It cannot detect the asymmetric case: one parallel test installs a mock, while another parallel test doesn't call any rewire function at all but happens to exercise the same target expecting the real implementation.
+
+```go
+func TestA(t *testing.T) {
+    t.Parallel()
+    rewire.Func(t, bar.Greet, func(string) string { return "fake" })
+    // ... uses bar.Greet
+}
+
+func TestB(t *testing.T) {
+    t.Parallel()
+    // No rewire call here — just uses bar.Greet directly.
+    if got := bar.Greet("x"); got != "Hello, x!" { // ← may silently see "fake"
+        t.Fatalf("got %q", got)
+    }
+}
+```
+
+TestA legitimately claims the mock variable. TestB never calls rewire, so nothing on TestB's side can observe the ownership. If both run concurrently, `bar.Greet` in TestB is non-deterministically either the real function or TestA's mock, depending on scheduling. Outcomes are unstable run-to-run.
+
+There's no reliable way for rewire to catch this from the outside — TestB has no rewire-instrumented entry point. The usual symptoms are flaky tests that pass in isolation and fail (or pass with the wrong output) under `-parallel`. If you see that pattern, audit whether another parallel test is mocking the same target.
+
+**Goroutine-level parallel safety was investigated and not shipped.** A working end-to-end prototype exists on a draft PR: [#6 — Parallel-safe `rewire.Func` via goroutine-inherited pprof labels](https://github.com/GiGurra/rewire/pull/6). It replaces the shared `Mock_Foo` variable with a per-goroutine-tree dispatch table keyed on a `runtime/pprof` labels pointer, so parallel tests each see their own mock and child goroutines inherit automatically. Held back from merging because it relies on an unofficial linkname loophole and the new wrapper shape is too complex for Go's inliner to absorb (a real regression on the "rewire is free when not mocked" property). See [`plans/parallel_test_safety_findings.md`](https://github.com/GiGurra/rewire/blob/main/plans/parallel_test_safety_findings.md) for the full write-up.
+
+The conflict detection documented above is the pragmatic alternative: it doesn't make rewire parallel-safe, but it turns a silent data race into a loud, actionable test failure.
 
 ## Bodyless functions
 

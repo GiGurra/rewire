@@ -114,3 +114,71 @@ func TestValidateFuncArgument_AcceptsMethodExpression(t *testing.T) {
 		t.Errorf("expected empty error for method expression, got:\n%s", msg)
 	}
 }
+
+// tryClaimOwnership is the pure side of the parallel-conflict detector —
+// unit tests live here so they can exercise conflicts without a subtest
+// propagating the failure up to the parent.
+
+func TestTryClaimOwnership_FreshKeyIsClaimed(t *testing.T) {
+	key := "TestTryClaimOwnership_FreshKeyIsClaimed|target-A"
+	t.Cleanup(func() { ownerRegistry.Delete(key) })
+
+	prior, claimed := tryClaimOwnership(key, t)
+	if !claimed {
+		t.Fatalf("fresh key should be claimed, got claimed=false priorOwner=%v", prior)
+	}
+	if prior != nil {
+		t.Errorf("no prior owner expected, got %v", prior)
+	}
+}
+
+func TestTryClaimOwnership_SameOwnerReturnsNotClaimedNoConflict(t *testing.T) {
+	key := "TestTryClaimOwnership_SameOwnerReturnsNotClaimedNoConflict|target-A"
+	t.Cleanup(func() { ownerRegistry.Delete(key) })
+
+	if _, claimed := tryClaimOwnership(key, t); !claimed {
+		t.Fatal("first claim should succeed")
+	}
+
+	// Second attempt by the same test is not a fresh claim (already owned
+	// by us) but also not a conflict — priorOwner is nil.
+	prior, claimed := tryClaimOwnership(key, t)
+	if claimed {
+		t.Error("second claim by same owner should not report claimed=true (already ours)")
+	}
+	if prior != nil {
+		t.Errorf("priorOwner should be nil for same-owner case, got %v", prior)
+	}
+}
+
+func TestTryClaimOwnership_DifferentOwnerReturnsPrior(t *testing.T) {
+	key := "TestTryClaimOwnership_DifferentOwnerReturnsPrior|target-A"
+	t.Cleanup(func() { ownerRegistry.Delete(key) })
+
+	// Seed with a sentinel *testing.T (the outer t) as the "prior" owner.
+	ownerRegistry.Store(key, t)
+
+	other := &testing.T{}
+	prior, claimed := tryClaimOwnership(key, other)
+	if claimed {
+		t.Error("should not claim when another owner holds the key")
+	}
+	if prior != t {
+		t.Errorf("priorOwner should be the outer t, got %v", prior)
+	}
+}
+
+func TestOwnershipConflictMsg_MentionsKeyContextAndFixes(t *testing.T) {
+	msg := ownershipConflictMsg("pkg.Foo", "TestOther")
+	for _, want := range []string{
+		"pkg.Foo",
+		"TestOther",
+		"not parallel-safe",
+		"t.Parallel()",
+		"InstanceFunc",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("conflict message missing %q; full:\n%s", want, msg)
+		}
+	}
+}
