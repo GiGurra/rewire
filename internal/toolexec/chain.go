@@ -5,7 +5,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
+	"sync"
 	"syscall"
 )
 
@@ -71,10 +74,16 @@ func parseChain(args []string) (rewireArgs []string, chain Chain, toolPath strin
 }
 
 // goToolBases is the set of basename identifiers Go's toolchain uses
-// for the tools invoked via -toolexec. We use this to locate the
-// real Go tool in a chain argv: the first absolute-path arg whose
-// basename is in this set is the tool, and anything before it is
-// successor-preprocessor metadata.
+// for the tools invoked via -toolexec. Locating the Go tool in a
+// chain argv requires both:
+//
+//  1. the basename (minus any .exe suffix) to be in this set, and
+//  2. the directory to equal $GOROOT/pkg/tool/$GOOS_$GOARCH/
+//
+// The directory check is the critical one: without it, a
+// preprocessor flag value like `--output /tmp/compile` would be
+// misclassified as the `compile` tool, silently truncating the
+// chain and feeding garbage to the compiler.
 //
 // Source: $GOROOT/src/cmd/go/internal/work/exec.go and the contents
 // of $GOROOT/pkg/tool/$GOOS_$GOARCH/.
@@ -95,9 +104,20 @@ var goToolBases = map[string]bool{
 	"fix":       true,
 }
 
+// goToolDir returns $GOROOT/pkg/tool/$GOOS_$GOARCH, the canonical
+// directory Go's build system places its tool binaries under. The
+// answer is invariant for the life of the process, so we cache it.
+var goToolDir = sync.OnceValue(func() string {
+	return filepath.Join(runtime.GOROOT(), "pkg", "tool", runtime.GOOS+"_"+runtime.GOARCH)
+})
+
 func findGoToolIndex(args []string) int {
+	dir := goToolDir()
 	for i, a := range args {
 		if !filepath.IsAbs(a) {
+			continue
+		}
+		if filepath.Dir(a) != dir {
 			continue
 		}
 		base := strings.TrimSuffix(filepath.Base(a), ".exe")
@@ -128,7 +148,7 @@ func execToolChained(c Chain, tool string, args []string) int {
 	if len(c.NextCmd) == 0 {
 		return execTool(tool, args)
 	}
-	childArgs := append(append([]string(nil), c.NextCmd[1:]...), tool)
+	childArgs := append(slices.Clone(c.NextCmd[1:]), tool)
 	childArgs = append(childArgs, args...)
 	cmd := exec.Command(c.NextCmd[0], childArgs...)
 	cmd.Stdin = os.Stdin
@@ -157,8 +177,7 @@ func execToolReplaceChained(c Chain, tool string, args []string) int {
 		// Fall back to fork+wait so the build still progresses.
 		return execToolChained(c, tool, args)
 	}
-	argv := append([]string{c.NextCmd[0]}, c.NextCmd[1:]...)
-	argv = append(argv, tool)
+	argv := append(slices.Clone(c.NextCmd), tool)
 	argv = append(argv, args...)
 	if err := syscall.Exec(prog, argv, os.Environ()); err != nil {
 		fmt.Fprintf(os.Stderr, "rewire: syscall.Exec failed for %s, falling back to fork+wait: %v\n", c.NextCmd[0], err)

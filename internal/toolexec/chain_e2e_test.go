@@ -9,33 +9,44 @@ import (
 	"testing"
 )
 
-// TestChainAndThen_ViaEnvPassthrough runs a real `go test -toolexec`
-// invocation with `rewire --and-then env <compile>` and verifies the
-// test still passes. `env`, given a command as its args, simply execs
-// that command — so the chain degenerates to "rewire rewrites, env
-// forwards to compile". If the chain wiring is wrong (e.g. rewire
-// bypasses rewriting when it sees a non-compile tool, or the
-// successor is dropped at exec), the mocked test would fail or the
-// compile would blow up with "undefined: _rewire_*".
+// TestChainAndThen_InvokesSuccessor drives a real `go test -toolexec`
+// chain through a sentinel-writing shim so the test can prove TWO
+// things:
 //
-// This is the minimum viable e2e: one real preprocessor plus one
-// trivial passthrough. Multi-preprocessor chains use the same
-// mechanism, so if this passes, N-hop chains with rewire at the
-// front are wired correctly.
-func TestChainAndThen_ViaEnvPassthrough(t *testing.T) {
+//  1. The mocked test passes (mock wiring survives the chain).
+//  2. The successor actually ran (sentinel file non-empty after
+//     build). Without this, a regression where rewire silently
+//     dropped the successor on some paths would still make the
+//     test pass, because rewire's rewriting alone is enough for
+//     the mock to work.
+//
+// The shim is a tiny POSIX shell script: appends "$1" (the tool path)
+// to a log, then execs "$@" — i.e. it's a passthrough with a side
+// effect we can observe.
+func TestChainAndThen_InvokesSuccessor(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("no /usr/bin/env on Windows")
+		t.Skip("POSIX shim is sh-based")
 	}
-	envPath, err := exec.LookPath("env")
-	if err != nil {
-		t.Skipf("no `env` binary on PATH: %v", err)
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skipf("no sh on PATH: %v", err)
 	}
 
 	ensureRewireInstalled(t)
 
 	tmpDir := t.TempDir()
 	pkgDir := filepath.Join(tmpDir, "pkg")
+	sentinelPath := filepath.Join(tmpDir, "chain.log")
+	shimPath := filepath.Join(tmpDir, "shim.sh")
+
 	if err := os.MkdirAll(pkgDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Shim: log the tool path, then exec the remaining argv. The
+	// shell expands "$@" correctly even when the rewritten .go
+	// paths contain spaces.
+	shim := "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$1\" >> " + sentinelPath + "\nexec \"$@\"\n"
+	if err := os.WriteFile(shimPath, []byte(shim), 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -90,16 +101,31 @@ func TestGetwd(t *testing.T) {
 		t.Fatalf("go mod tidy: %v\n%s", err, out)
 	}
 
-	// -toolexec invokes "rewire --and-then env" as a single program
+	// -toolexec invokes "rewire --and-then <shim>" as a single program
 	// string. Go tokenizes it and prepends it to every tool call.
 	// rewire parses its own args up to --and-then, treats the rest
 	// as "the command that replaces the bare tool invocation".
-	toolexec := "rewire --and-then " + envPath
+	toolexec := "rewire --and-then " + shimPath
 	cmd := exec.Command("go", "test", "-toolexec="+toolexec, "-count=1", "./pkg/")
 	cmd.Dir = tmpDir
 	cmd.Env = subEnv
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("chained go test failed: %v\n%s", err, out)
+	}
+
+	data, err := os.ReadFile(sentinelPath)
+	if err != nil {
+		t.Fatalf("sentinel not written — shim never invoked, so the chain dropped the successor: %v", err)
+	}
+	log := strings.TrimSpace(string(data))
+	if log == "" {
+		t.Fatal("sentinel empty — shim ran but logged nothing; unexpected")
+	}
+	// The shim sees the go-tool path as its first arg on every
+	// invocation. A successful build under -toolexec hits compile
+	// at minimum, so the log must mention it.
+	if !strings.Contains(log, string(os.PathSeparator)+"compile") {
+		t.Fatalf("sentinel log does not mention the compile tool — chain wiring suspect.\nlog:\n%s", log)
 	}
 }
