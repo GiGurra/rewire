@@ -205,9 +205,21 @@ func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, pkg
 				return nil, nil, fmt.Errorf("reading %s: %w", arg, err)
 			}
 
+			// Supply the absolute path as OrigPath so the rewriter emits
+			// //line directives pointing at the user's source. Without
+			// this the DWARF records the tempdir path and IDE
+			// breakpoints on the user's file never resolve.
+			absPath, absErr := filepath.Abs(arg)
+			if absErr != nil {
+				absPath = arg
+			}
+
 			rewritten := src
 			for _, fn := range funcsToMock {
-				opts := rewriter.RewriteOptions{ByInstance: pkgByInstance[fn]}
+				opts := rewriter.RewriteOptions{
+					ByInstance: pkgByInstance[fn],
+					OrigPath:   absPath,
+				}
 				result, err := rewriter.RewriteSourceOpts(rewritten, fn, opts)
 				if err != nil {
 					if strings.Contains(err.Error(), "not found") {
