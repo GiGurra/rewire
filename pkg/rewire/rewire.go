@@ -15,6 +15,7 @@ var (
 	realRegistry        sync.Map // func name (string) → real function value (any)
 	byInstanceRegistry  sync.Map // func name (string) → *sync.Map (per-method per-instance table)
 	mockFactoryRegistry sync.Map // interface name (string) → func() any (mock instance factory)
+	ownerRegistry       sync.Map // target key (string) → owning *testing.T (parallel-conflict detection)
 )
 
 // Register maps a fully-qualified function name to a pointer to its mock variable.
@@ -167,6 +168,11 @@ func NewMock[I any](t *testing.T) I {
 //
 // Requires -toolexec=rewire (or GOFLAGS="-toolexec=rewire") to be active.
 //
+// If a different test is currently mocking the same target, Func fails via
+// t.Fatalf — rewire is not parallel-safe for two t.Parallel() tests mocking
+// the same target, and the conflict is detected rather than left to race.
+// Reinstalling a mock on a target the same test already mocks is allowed.
+//
 // Usage:
 //
 //	rewire.Func(t, bar.Greet, func(name string) string {
@@ -175,11 +181,26 @@ func NewMock[I any](t *testing.T) I {
 func Func[F any](t *testing.T, original F, replacement F) {
 	t.Helper()
 
+	// Validate up front so we can compute the ownership key before
+	// dispatching to the generic or non-generic path. The helpers that
+	// follow re-validate, but it's cheap.
+	if msg := validateFuncArgument(original); msg != "" {
+		t.Fatal(msg)
+		return
+	}
+	name := funcName(original)
+	if msg := methodValueError(name); msg != "" {
+		t.Fatal(msg)
+		return
+	}
+	typeSig := reflect.TypeOf(original).String()
+	claimOwnership(t, name+"|"+typeSig, name)
+
 	// For generic functions the registry entry is a *sync.Map keyed on the
 	// type signature of the specific instantiation; each instantiation is
 	// mocked independently.
 	if genericMockMap, ok := resolveGenericMockMap(t, original); ok {
-		key := reflect.TypeOf(original).String()
+		key := typeSig
 		genericMockMap.Store(key, replacement)
 		t.Cleanup(func() { genericMockMap.Delete(key) })
 		return
@@ -305,14 +326,21 @@ func resolveGenericMockMap[F any](t *testing.T, original F) (*sync.Map, bool) {
 func RestoreFunc[F any](t *testing.T, original F) {
 	t.Helper()
 
-	// Generic path: delete the instantiation-specific mock entry.
+	// Generic path: delete the instantiation-specific mock entry and
+	// release per-instantiation ownership.
 	if genericMockMap, ok := resolveGenericMockMap(t, original); ok {
-		genericMockMap.Delete(reflect.TypeOf(original).String())
+		typeSig := reflect.TypeOf(original).String()
+		genericMockMap.Delete(typeSig)
+		releaseOwnership(t, funcName(original)+"|"+typeSig)
 		return
 	}
 
 	elemVal := resolveMockVar(t, original)
 	elemVal.Set(reflect.Zero(elemVal.Type()))
+
+	// Release ownership so a concurrent test may now claim the target.
+	// Safe for targets the current test doesn't own (CompareAndDelete is a no-op).
+	releaseOwnership(t, funcName(original)+"|"+reflect.TypeOf(original).String())
 }
 
 // RestoreInstance clears every per-instance mock currently scoped to
@@ -326,6 +354,27 @@ func RestoreFunc[F any](t *testing.T, original F) {
 func RestoreInstance[I any](t *testing.T, instance I) {
 	t.Helper()
 	restoreInstanceAll(instance)
+
+	// Release any per-instance ownership entries this test holds for this
+	// instance. Per-instance keys are name|typeSig|ptr, so we scan the
+	// owner registry and drop entries whose key ends with our instance's
+	// address and whose owner is this test.
+	v := reflect.ValueOf(instance)
+	if v.Kind() != reflect.Pointer || v.IsNil() {
+		return
+	}
+	suffix := fmt.Sprintf("|%#x", v.Pointer())
+	ownerRegistry.Range(func(k, val any) bool {
+		key, _ := k.(string)
+		if !strings.HasSuffix(key, suffix) {
+			return true
+		}
+		owner, _ := val.(*testing.T)
+		if owner == t {
+			ownerRegistry.CompareAndDelete(key, t)
+		}
+		return true
+	})
 }
 
 // InstanceFunc installs a per-instance mock for a pointer-receiver
@@ -369,10 +418,25 @@ func InstanceFunc[I any, F any](t *testing.T, instance I, original F, replacemen
 		t.Fatal(msg)
 		return
 	}
-	if reflect.ValueOf(instance).Kind() != reflect.Pointer || reflect.ValueOf(instance).IsNil() {
+	instVal := reflect.ValueOf(instance)
+	if instVal.Kind() != reflect.Pointer || instVal.IsNil() {
 		t.Fatal("rewire.InstanceFunc: instance must be a non-nil pointer value")
 		return
 	}
+
+	name := funcName(original)
+	if msg := methodValueError(name); msg != "" {
+		t.Fatal(msg)
+		return
+	}
+	// Ownership is scoped to (method, function type, receiver address) so
+	// that two parallel tests mocking the same method on *different*
+	// receivers don't trip the check — that's a legitimate use case.
+	claimOwnership(
+		t,
+		fmt.Sprintf("%s|%s|%#x", name, reflect.TypeFor[F]().String(), instVal.Pointer()),
+		fmt.Sprintf("%s on instance 0x%x", name, instVal.Pointer()),
+	)
 
 	m := resolveByInstanceMap(t, original)
 	if m == nil {
@@ -402,6 +466,13 @@ func RestoreInstanceFunc[I any, F any](t *testing.T, instance I, original F) {
 		return
 	}
 	m.Delete(any(instance))
+
+	// Release per-instance ownership for this (method, type, receiver) tuple.
+	v := reflect.ValueOf(instance)
+	if v.Kind() != reflect.Pointer || v.IsNil() {
+		return
+	}
+	releaseOwnership(t, fmt.Sprintf("%s|%s|%#x", funcName(original), reflect.TypeFor[F]().String(), v.Pointer()))
 }
 
 // restoreInstanceAll clears every per-instance mock scoped to instance
@@ -498,6 +569,86 @@ func resolveMockVar[F any](t *testing.T, original F) reflect.Value {
 	}
 
 	return reflect.ValueOf(mockPtrAny).Elem()
+}
+
+// claimOwnership records t as the exclusive owner of the mock target
+// identified by key. If a different *testing.T currently owns the target,
+// claimOwnership fails the test with t.Fatalf, reporting a parallel-mock
+// conflict. Ownership is released when t ends via t.Cleanup. Re-entrance
+// from the same test (e.g. a test that installs and then reinstalls a
+// mock on the same target) is a no-op.
+//
+// This exists to detect the one parallel-safety hole rewire has: two
+// t.Parallel() tests mocking the same target race silently on the shared
+// package-level mock variable. Catching that at install time turns a
+// silent data race into a clear test failure.
+//
+// targetDescription is a human-readable identifier (the function or
+// method name, not the composite registry key) used only in the error
+// message.
+func claimOwnership(t *testing.T, key, targetDescription string) {
+	t.Helper()
+
+	existingOwner, claimed := tryClaimOwnership(key, t)
+	if claimed {
+		// We're the first claimant. Release ownership when our test ends.
+		t.Cleanup(func() { ownerRegistry.CompareAndDelete(key, t) })
+		return
+	}
+	if existingOwner == nil || existingOwner == t {
+		// Same test, already owns this target — allow reinstall.
+		return
+	}
+	t.Fatal(ownershipConflictMsg(targetDescription, existingOwner.Name()))
+}
+
+// tryClaimOwnership attempts to register owner as the holder of key. It
+// returns (nil, true) if owner now holds the key (either a fresh claim or
+// owner was already the holder). It returns (priorOwner, false) if a
+// different *testing.T currently holds the key.
+//
+// Split out from claimOwnership so the conflict-detection logic can be
+// unit-tested without triggering t.Fatal. Registering cleanup is the
+// caller's responsibility — tryClaimOwnership is side-effect-minimal by
+// design.
+func tryClaimOwnership(key string, owner *testing.T) (priorOwner *testing.T, claimed bool) {
+	existing, loaded := ownerRegistry.LoadOrStore(key, owner)
+	if !loaded {
+		return nil, true
+	}
+	existingT, _ := existing.(*testing.T)
+	if existingT == owner {
+		return nil, false
+	}
+	return existingT, false
+}
+
+// ownershipConflictMsg is the message shown when two different tests try
+// to mock the same target concurrently. Split out so it can be tested in
+// isolation.
+func ownershipConflictMsg(targetDescription, existingOwnerName string) string {
+	return fmt.Sprintf(
+		"rewire: cannot install mock for %s — already mocked by test %q.\n"+
+			"  Two different tests tried to install a mock on the same target concurrently.\n"+
+			"  rewire.Func / rewire.InstanceFunc are not parallel-safe for the same target:\n"+
+			"  a single shared mock variable backs every call site, so overlapping installs\n"+
+			"  would race silently on that variable.\n"+
+			"  Fixes:\n"+
+			"    - Remove t.Parallel() from one of the tests, or\n"+
+			"    - Mock a different target in each parallel test, or\n"+
+			"    - Use rewire.InstanceFunc on separate receivers so each test owns its own scope.",
+		targetDescription, existingOwnerName,
+	)
+}
+
+// releaseOwnership clears the ownership entry for key if t currently owns
+// it. Called by RestoreFunc / RestoreInstance / RestoreInstanceFunc so
+// that a test can explicitly relinquish a mock mid-run, letting a
+// concurrent test claim the target. No-op if t does not own the entry
+// (CompareAndDelete only removes on match), so it's safe to call on
+// targets that were never mocked or that belong to another test.
+func releaseOwnership(t *testing.T, key string) {
+	ownerRegistry.CompareAndDelete(key, t)
 }
 
 // validateFuncArgument checks that f is a usable function value and returns

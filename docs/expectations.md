@@ -390,7 +390,7 @@ Wrong argument count, wrong argument types, non-function predicates, wrong predi
 
 - **Full argument/return type checking at compile time isn't possible** — Go's generics can't decompose a function type `F = func(A1, A2) R` into its parts inside methods of a generic type. We do the next best thing: `.On(args...)` and `.Returns(vals...)` take `...any`, but every argument and return value is type-checked against the target's reflect signature at registration time. Wrong types fail immediately with a clear diagnostic, not later at test runtime.
 - **`.Match(predicate)` and `.DoFunc(fn)` are fully type-checked at compile time** — both take typed Go functions whose types are enforced by the Go compiler. Prefer these when you want compile-time argument type safety.
-- **Parallel test safety** — inherited from `rewire.Func`. Don't use `expect.For` on the same target in `t.Parallel()` tests that run concurrently; they'll race on the package-level mock variable.
+- **Parallel test safety** — inherited from `rewire.Func`. Two concurrent tests that install `expect.For` on the same target will trip rewire's install-time conflict detector: the second test fails with `t.Fatalf` naming the conflicting test. Parallel tests on *different* targets are fine. See [Limitations — parallel mock safety](limitations.md#no-parallel-mock-safety-but-conflicts-are-detected).
 - **Reflect dispatch overhead** — each mocked call goes through `reflect.Call`. Should be negligible for test-path code.
 
 ## Related
