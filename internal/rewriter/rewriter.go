@@ -8,6 +8,7 @@ import (
 	"go/parser"
 	"go/printer"
 	"go/token"
+	"path/filepath"
 	"reflect"
 	"strings"
 )
@@ -24,6 +25,16 @@ type RewriteOptions struct {
 	// methods on generic types). Rejected with a clear error for free
 	// functions, value-receiver methods, and plain generic functions.
 	ByInstance bool
+
+	// OrigPath, when non-empty, causes the rewriter to emit //line
+	// directives in the output so the Go compiler records the user's
+	// original source path (and approximate line numbers for the
+	// renamed body) in DWARF. Without this, debuggers can't match
+	// breakpoints set on the user's file against the binary built from
+	// rewire's tempdir-staged rewritten source — the DWARF path would
+	// point at the tempdir, which the IDE never shows the user. Should
+	// be an absolute path for predictable matching.
+	OrigPath string
 }
 
 // RewriteSource takes Go source code and a function name, and returns
@@ -118,13 +129,20 @@ func RewriteSourceOpts(src []byte, funcName string, opts RewriteOptions) ([]byte
 		return nil, fmt.Errorf("function %q not found", funcName)
 	}
 
+	// Capture the target's original line BEFORE any mutation so we can
+	// emit a //line directive before the renamed _real_X body. With
+	// multiple rewrites in the same file the input source already has
+	// //line directives from earlier passes, and the parser has folded
+	// those into fset, so fset.Position returns the user-facing line.
+	origStartLine := fset.Position(target.Pos()).Line
+
 	// Function-level type parameters (only legal on plain functions in
 	// Go 1.18+ — methods can't declare their own type params).
 	if target.Type.TypeParams != nil && target.Type.TypeParams.NumFields() > 0 {
 		if isMethod {
 			return nil, fmt.Errorf("method-level type parameters are not supported — put them on the receiver type (function %q)", funcName)
 		}
-		return rewriteGenericFunction(fset, file, target, targetIdx, funcName)
+		return rewriteGenericFunction(fset, file, target, targetIdx, funcName, opts.OrigPath, origStartLine)
 	}
 
 	// Methods on generic types: the method itself has no TypeParams, but
@@ -132,7 +150,7 @@ func RewriteSourceOpts(src []byte, funcName string, opts RewriteOptions) ([]byte
 	// the receiver type spec in the file and branch if found.
 	if isMethod {
 		if typeTypeParams := findTypeDeclTypeParams(file, typeName); typeTypeParams != nil {
-			return rewriteGenericMethod(fset, file, target, targetIdx, typeName, methodName, isPointer, typeTypeParams, opts.ByInstance)
+			return rewriteGenericMethod(fset, file, target, targetIdx, typeName, methodName, isPointer, typeTypeParams, opts.ByInstance, opts.OrigPath, origStartLine)
 		}
 	}
 
@@ -331,7 +349,7 @@ func %s%s(%s) %s {
 	if err := format.Node(&buf, fset, file); err != nil {
 		return nil, fmt.Errorf("formatting output: %w", err)
 	}
-	return buf.Bytes(), nil
+	return injectLineDirectives(buf.Bytes(), opts.OrigPath, origStartLine, realFuncName), nil
 }
 
 // rewriteGenericFunction handles the generic-function branch of RewriteSource.
@@ -364,7 +382,7 @@ func %s%s(%s) %s {
 // fset (which was the cause of mangled `sync.\n\tMap` formatting on an
 // earlier attempt). reflect+sync imports are injected via ensureImport,
 // which also works via position-cleared AST nodes.
-func rewriteGenericFunction(fset *token.FileSet, file *ast.File, target *ast.FuncDecl, targetIdx int, funcName string) ([]byte, error) {
+func rewriteGenericFunction(fset *token.FileSet, file *ast.File, target *ast.FuncDecl, targetIdx int, funcName, origPath string, origStartLine int) ([]byte, error) {
 	params := ensureParamNames(target.Type.Params)
 	hasResults := target.Type.Results != nil && len(target.Type.Results.List) > 0
 	isVariadic := isVariadicFunc(target.Type)
@@ -492,7 +510,7 @@ func %s%s(%s) %s {
 	if err := format.Node(&buf, fset, file); err != nil {
 		return nil, fmt.Errorf("formatting output: %w", err)
 	}
-	return buf.Bytes(), nil
+	return injectLineDirectives(buf.Bytes(), origPath, origStartLine, realFuncName), nil
 }
 
 // findTypeDeclTypeParams searches file for a top-level type declaration
@@ -554,7 +572,7 @@ func findTypeDeclTypeParams(file *ast.File, typeName string) *ast.FieldList {
 // The method itself can't declare type parameters (Go 1.18+ forbids it),
 // so all type params come from the receiver's type declaration, passed
 // in as typeTypeParams.
-func rewriteGenericMethod(fset *token.FileSet, file *ast.File, target *ast.FuncDecl, targetIdx int, typeName, methodName string, isPointer bool, typeTypeParams *ast.FieldList, byInstance bool) ([]byte, error) {
+func rewriteGenericMethod(fset *token.FileSet, file *ast.File, target *ast.FuncDecl, targetIdx int, typeName, methodName string, isPointer bool, typeTypeParams *ast.FieldList, byInstance bool, origPath string, origStartLine int) ([]byte, error) {
 	params := ensureParamNames(target.Type.Params)
 	hasResults := target.Type.Results != nil && len(target.Type.Results.List) > 0
 	isVariadic := isVariadicFunc(target.Type)
@@ -741,7 +759,65 @@ func %s %s(%s) %s {
 	if err := format.Node(&buf, fset, file); err != nil {
 		return nil, fmt.Errorf("formatting output: %w", err)
 	}
-	return buf.Bytes(), nil
+	return injectLineDirectives(buf.Bytes(), origPath, origStartLine, realFuncName), nil
+}
+
+// injectLineDirectives emits //line directives in out so DWARF records
+// the user's original source path and the renamed _real_<name> body's
+// lines map back to the user's source. When origPath is empty, out is
+// returned unchanged.
+//
+// Two directives are emitted:
+//
+//  1. A file-level `//line <origPath>:1` at the top, so all output
+//     before the wrapper synthesis is mapped to the user's file. This
+//     alone fixes the DWARF source path so IDE breakpoints at least
+//     land on the correct file.
+//
+//  2. A body-level `//line <origPath>:<origStartLine>` right before
+//     `func [...] <realFuncName>(` in the output, so the renamed
+//     body's statements line up with the user's original line numbers.
+//     Without this, the wrapper decls spliced above _real_<name> shift
+//     every body line downstream, and a breakpoint set at the user's
+//     original line 5 would never resolve because DWARF records a
+//     different line.
+//
+// The body-reset search accepts both `<realFuncName>(` (plain func,
+// method, non-generic) and `<realFuncName>[` (generic function with a
+// type-parameter list) as the decl-starting token.
+func injectLineDirectives(out []byte, origPath string, origStartLine int, realFuncName string) []byte {
+	if origPath == "" {
+		return out
+	}
+
+	// Locate the _real_<name> declaration so the body-reset directive
+	// lands on the line immediately above it. The declaration is
+	// ALWAYS the last occurrence of `_real_<name>(` (plain func or
+	// method) or `_real_<name>[` (generic func, whose decl carries a
+	// type-parameter list) in the output — every earlier occurrence
+	// is a call site inside a preceding wrapper or Real alias body.
+	idx := bytes.LastIndex(out, []byte(realFuncName+"("))
+	if idxBracket := bytes.LastIndex(out, []byte(realFuncName+"[")); idxBracket > idx {
+		idx = idxBracket
+	}
+	if idx >= 0 {
+		// Walk back to the line start.
+		lineStart := idx
+		for lineStart > 0 && out[lineStart-1] != '\n' {
+			lineStart--
+		}
+		directive := fmt.Appendf(nil, "//line %s:%d\n", origPath, origStartLine)
+		combined := make([]byte, 0, len(out)+len(directive))
+		combined = append(combined, out[:lineStart]...)
+		combined = append(combined, directive...)
+		combined = append(combined, out[lineStart:]...)
+		out = combined
+	}
+
+	// File-level prefix: makes the compiler record origPath as the
+	// source file and rebases logical line 1 onto the user's source.
+	prefix := fmt.Appendf(nil, "//line %s:1\n", origPath)
+	return append(prefix, out...)
 }
 
 // clearNodePositions neutralizes token.Pos fields on nodes reachable from
@@ -839,7 +915,14 @@ func RewriteFile(filePath string, funcName string) ([]byte, error) {
 		return nil, fmt.Errorf("reading file source: %w", err)
 	}
 
-	return RewriteSource(src, funcName)
+	// Supply the absolute path so the rewriter emits //line directives
+	// pointing at the user's source; debuggers and IDE breakpoints rely
+	// on DWARF carrying this path, not the tempdir the compiler sees.
+	absPath, absErr := filepath.Abs(filePath)
+	if absErr != nil {
+		absPath = filePath
+	}
+	return RewriteSourceOpts(src, funcName, RewriteOptions{OrigPath: absPath})
 }
 
 // RewriteAllExported rewrites all exported, non-method, non-generic functions

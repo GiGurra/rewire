@@ -1052,7 +1052,142 @@ func (s *Server) Handle(req string) string {
 	assertNotContains(t, result, `"sync"`)
 }
 
+// TestRewriteEmitsLineDirectives verifies that when OrigPath is set
+// the rewriter emits a file-level //line directive so DWARF records
+// the user's source path AND a body-reset directive before _real_X
+// so the renamed body's lines map back to the user's original line
+// numbers. Without these, IDE breakpoints on the user's file can't
+// resolve against the binary built from rewire's tempdir-staged source.
+func TestRewriteEmitsLineDirectives(t *testing.T) {
+	src := []byte(`package bar
+
+func Hello(name string) string {
+	return "hello " + name
+}
+`)
+	const origPath = "/home/user/proj/bar/hello.go"
+	out, err := RewriteSourceOpts(src, "Hello", RewriteOptions{OrigPath: origPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+
+	// File-level prefix: the very first line of the output must
+	// point the compiler at the user's source path for DWARF.
+	wantPrefix := "//line " + origPath + ":1\n"
+	if !hasPrefix(got, wantPrefix) {
+		first := got
+		if i := indexByte(first, '\n'); i >= 0 {
+			first = first[:i]
+		}
+		t.Errorf("missing or wrong file-level //line prefix.\nwant: %q\ngot:  %q", wantPrefix, first)
+	}
+
+	// Body-level reset: func Hello was declared on line 3 of the
+	// original source, so the //line directive preceding _real_Hello
+	// must name line 3.
+	wantBodyReset := "//line " + origPath + ":3\n"
+	if !contains(got, wantBodyReset) {
+		t.Errorf("missing body-reset //line directive before _real_Hello.\nwant: %q\n--- output:\n%s", wantBodyReset, got)
+	}
+
+	// The body-reset directive must land on the line immediately
+	// preceding `func _real_Hello(`. Otherwise the renamed body
+	// lines still don't line up with the user's original source.
+	resetIdx := indexOf(got, wantBodyReset)
+	declIdx := indexOf(got, "func _real_Hello(")
+	if resetIdx < 0 || declIdx < 0 || declIdx < resetIdx {
+		t.Errorf("body-reset directive is not positioned before func _real_Hello(.\n--- output:\n%s", got)
+	} else {
+		between := got[resetIdx+len(wantBodyReset) : declIdx]
+		if between != "" {
+			t.Errorf("unexpected content between //line directive and func _real_Hello(: %q\n--- output:\n%s", between, got)
+		}
+	}
+
+	// The rewritten output must still parse as valid Go. Line
+	// directives are ordinary comments to go/parser, so this is
+	// the primary guard against accidentally producing malformed
+	// output (e.g. a directive landing on a line that already has
+	// code).
+	assertParsesAsGo(t, got)
+}
+
+// TestRewriteLineDirectivesMethod repeats the check for a
+// pointer-receiver method, which takes a different rewriter path
+// but still must emit both //line directives.
+func TestRewriteLineDirectivesMethod(t *testing.T) {
+	src := []byte(`package bar
+
+type Server struct{}
+
+func (s *Server) Handle(req string) string {
+	return req
+}
+`)
+	const origPath = "/abs/path/server.go"
+	out, err := RewriteSourceOpts(src, "(*Server).Handle", RewriteOptions{OrigPath: origPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+
+	if !hasPrefix(got, "//line "+origPath+":1\n") {
+		t.Errorf("missing file-level //line prefix.\n--- output:\n%s", got)
+	}
+	// Method declaration was on line 5 of the original source.
+	if !contains(got, "//line "+origPath+":5\n") {
+		t.Errorf("missing body-reset //line directive for method.\n--- output:\n%s", got)
+	}
+	assertParsesAsGo(t, got)
+}
+
+// TestRewriteNoLineDirectivesWhenOrigPathEmpty confirms that leaving
+// OrigPath empty preserves the prior behavior (no //line directives),
+// so callers that don't care about debugger support see unchanged output.
+func TestRewriteNoLineDirectivesWhenOrigPathEmpty(t *testing.T) {
+	src := []byte(`package bar
+
+func Hello(name string) string {
+	return "hello " + name
+}
+`)
+	out, err := RewriteSourceOpts(src, "Hello", RewriteOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+	if contains(got, "//line ") {
+		t.Errorf("expected no //line directives when OrigPath is empty.\n--- output:\n%s", got)
+	}
+}
+
 // --- Helpers ---
+
+func hasPrefix(s, prefix string) bool {
+	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
+}
+
+func indexByte(s string, b byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == b {
+			return i
+		}
+	}
+	return -1
+}
+
+func indexOf(s, substr string) int {
+	if len(substr) == 0 {
+		return 0
+	}
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return i
+		}
+	}
+	return -1
+}
 
 func assertParsesAsGo(t *testing.T, src string) {
 	t.Helper()
