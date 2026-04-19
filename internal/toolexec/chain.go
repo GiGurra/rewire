@@ -107,8 +107,16 @@ var goToolBases = map[string]bool{
 // goToolDir returns $GOROOT/pkg/tool/$GOOS_$GOARCH, the canonical
 // directory Go's build system places its tool binaries under. The
 // answer is invariant for the life of the process, so we cache it.
+//
+// We avoid runtime.GOROOT() because it was deprecated in Go 1.24:
+// the path baked into the running binary is meaningless if the
+// binary is run on a machine other than the one it was built on.
+// Shelling out to `go env GOROOT` matches the rest of this package
+// (see goroot() in intrinsics.go) and reports the GOROOT of
+// whichever go toolchain is on $PATH — which is the toolchain
+// actually running this build.
 var goToolDir = sync.OnceValue(func() string {
-	return filepath.Join(runtime.GOROOT(), "pkg", "tool", runtime.GOOS+"_"+runtime.GOARCH)
+	return filepath.Join(goroot(), "pkg", "tool", runtime.GOOS+"_"+runtime.GOARCH)
 })
 
 func findGoToolIndex(args []string) int {
