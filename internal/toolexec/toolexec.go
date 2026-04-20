@@ -318,9 +318,22 @@ func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, pkg
 		if len(mockFiles) > 0 {
 			newArgs = append(newArgs, mockFiles...)
 			// Interface mocks pull in "sync" (for the per-instance
-			// dispatch tables) and may reference packages the original
-			// test source didn't import. Patch the importcfg.
-			patched, extraCleanup, err := ensureStdImportsInCfg(newArgs, "sync")
+			// dispatch tables) and may reference packages that the
+			// original test source didn't import — typically because
+			// the interface's method signature uses a type from a
+			// different package that was pulled in only transitively.
+			// Go's build system sizes -importcfg from the test package's
+			// source-file imports, so those packages aren't listed even
+			// though they're already compiled. Collect the imports from
+			// every generated mock file, union with "sync", and patch
+			// the importcfg so the compile can resolve them.
+			extraPkgs, err := collectGeneratedMockImports(mockFiles)
+			if err != nil {
+				cleanup()
+				return nil, nil, fmt.Errorf("collecting generated mock imports: %w", err)
+			}
+			extraPkgs = append(extraPkgs, "sync")
+			patched, extraCleanup, err := ensureStdImportsInCfg(newArgs, extraPkgs...)
 			if err != nil {
 				cleanup()
 				return nil, nil, fmt.Errorf("patching importcfg for interface mocks: %w", err)
@@ -562,6 +575,39 @@ func envWithoutGOFLAGS() []string {
 		}
 	}
 	return filtered
+}
+
+// collectGeneratedMockImports parses each generated mock file and
+// returns the union of their non-stdlib-only import paths. The result
+// is fed into ensureStdImportsInCfg so the compiler can resolve every
+// package the generated code references, even ones the original test
+// source never imported. stdlib packages are included — go list
+// handles them via $GOROOT and extra entries in importcfg are a
+// no-op if the compiler already has them listed.
+func collectGeneratedMockImports(mockFiles []string) ([]string, error) {
+	seen := map[string]bool{}
+	fset := token.NewFileSet()
+	for _, path := range mockFiles {
+		f, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
+		if err != nil {
+			return nil, fmt.Errorf("parsing generated mock %s for imports: %w", path, err)
+		}
+		for _, imp := range f.Imports {
+			p := strings.Trim(imp.Path.Value, `"`)
+			if p == "" {
+				continue
+			}
+			seen[p] = true
+		}
+	}
+	if len(seen) == 0 {
+		return nil, nil
+	}
+	out := make([]string, 0, len(seen))
+	for p := range seen {
+		out = append(out, p)
+	}
+	return out, nil
 }
 
 // newRewireTmpDir returns a per-compile scratch directory for generated
