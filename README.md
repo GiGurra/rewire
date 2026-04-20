@@ -4,8 +4,6 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/GiGurra/rewire)](https://goreportcard.com/report/github.com/GiGurra/rewire)
 [![Docs](https://img.shields.io/badge/docs-gigurra.github.io%2Frewire-blue)](https://gigurra.github.io/rewire/)
 
-> **Experimental** — Use at your own risk.
-
 Mock anything — No `go generate` code generation, no runtime patching.
 
 ```go
