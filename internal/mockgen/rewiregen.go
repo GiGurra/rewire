@@ -306,15 +306,25 @@ func GenerateRewireMock(
 	// Stable iteration order for deterministic output.
 	sort.SliceStable(methods, func(i, j int) bool { return methods[i].name < methods[j].name })
 
-	// Derive synthetic names from (interfacePkgAlias, interfaceName,
+	// Derive synthetic names from (interfacePkgPath, interfaceName,
 	// type-args). All identifiers use ASCII-only characters compatible
-	// with Go syntax. For generic instantiations the mangled type
-	// arguments disambiguate the struct, e.g.:
+	// with Go syntax. An 8-hex-char hash of the full import path
+	// disambiguates two packages that happen to share the same
+	// declared `package X` identifier — without the hash, mocking
+	// interfaces from both (e.g. a project that imports
+	// foo/http and bar/http where both declare `package httpcaller`)
+	// produces two structs with the same name in the generated
+	// test package and the compile fails with "redeclared". The hash
+	// is deterministic, so names are stable across runs and parallel
+	// compile workers.
 	//
-	//   _rewire_mock_bar_GreeterIface         (non-generic)
-	//   _rewire_mock_bar_ContainerIface_int   (Container[int])
-	//   _rewire_mock_bar_CacheIface_string_int (Cache[string, int])
-	structName := "_rewire_mock_" + interfacePkgAlias + "_" + interfaceName
+	// For generic instantiations the mangled type arguments add a
+	// final suffix, e.g.:
+	//
+	//   _rewire_mock_bar_{hash}_GreeterIface         (non-generic)
+	//   _rewire_mock_bar_{hash}_ContainerIface_int   (Container[int])
+	//   _rewire_mock_bar_{hash}_CacheIface_string_int (Cache[string, int])
+	structName := "_rewire_mock_" + interfacePkgAlias + "_" + ShortImportPathHash(interfacePkgPath) + "_" + interfaceName
 	if len(typeArgs) > 0 {
 		structName += "_" + mangleTypeArgsForIdent(typeArgs)
 	}

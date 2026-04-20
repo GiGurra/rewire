@@ -181,11 +181,10 @@ func findFlag(args []string, flag string) string {
 // For test compilations, it generates a registration file directly from targets.
 func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, pkgByInstance map[string]bool, isTest bool, allTargets mockTargets, allInstantiations genericInstantiations, allByInstance byInstanceTargets) ([]string, func(), error) {
 	defer profileStage("rewrite-compile-args", pkgPath)()
-	tmpDir, err := os.MkdirTemp("", "rewire-*")
+	tmpDir, cleanup, err := newRewireTmpDir()
 	if err != nil {
-		return nil, nil, fmt.Errorf("creating temp dir: %w", err)
+		return nil, nil, err
 	}
-	cleanup := func() { _ = os.RemoveAll(tmpDir) }
 
 	newArgs := make([]string, len(args))
 	copy(newArgs, args)
@@ -319,9 +318,22 @@ func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, pkg
 		if len(mockFiles) > 0 {
 			newArgs = append(newArgs, mockFiles...)
 			// Interface mocks pull in "sync" (for the per-instance
-			// dispatch tables) and may reference packages the original
-			// test source didn't import. Patch the importcfg.
-			patched, extraCleanup, err := ensureStdImportsInCfg(newArgs, "sync")
+			// dispatch tables) and may reference packages that the
+			// original test source didn't import — typically because
+			// the interface's method signature uses a type from a
+			// different package that was pulled in only transitively.
+			// Go's build system sizes -importcfg from the test package's
+			// source-file imports, so those packages aren't listed even
+			// though they're already compiled. Collect the imports from
+			// every generated mock file, union with "sync", and patch
+			// the importcfg so the compile can resolve them.
+			extraPkgs, err := collectGeneratedMockImports(mockFiles)
+			if err != nil {
+				cleanup()
+				return nil, nil, fmt.Errorf("collecting generated mock imports: %w", err)
+			}
+			extraPkgs = append(extraPkgs, "sync")
+			patched, extraCleanup, err := ensureStdImportsInCfg(newArgs, extraPkgs...)
 			if err != nil {
 				cleanup()
 				return nil, nil, fmt.Errorf("patching importcfg for interface mocks: %w", err)
@@ -435,7 +447,12 @@ func generateInterfaceMocks(compileArgs []string, tmpDir string) ([]string, func
 				if err != nil {
 					return nil, nil, fmt.Errorf("generating mock for %s.%s%s: %w", importPath, ifaceName, formatTypeArgs(inst.TypeArgs), err)
 				}
-				outPath := filepath.Join(tmpDir, fmt.Sprintf("_rewire_mock_%s_%s%s_test.go", alias, ifaceName, mangleTypeArgs(inst.TypeArgs)))
+				// Include a hash of the full import path in the filename
+				// so two packages that share the same declared name (e.g.
+				// both declaring `package caller` at different paths)
+				// don't write to the same output file — the second would
+				// otherwise silently overwrite the first.
+				outPath := filepath.Join(tmpDir, fmt.Sprintf("_rewire_mock_%s_%s_%s%s_test.go", alias, mockgen.ShortImportPathHash(importPath), ifaceName, mangleTypeArgs(inst.TypeArgs)))
 				if err := os.WriteFile(outPath, generated, 0644); err != nil {
 					return nil, nil, fmt.Errorf("writing generated mock file: %w", err)
 				}
@@ -558,6 +575,99 @@ func envWithoutGOFLAGS() []string {
 		}
 	}
 	return filtered
+}
+
+// collectGeneratedMockImports parses each generated mock file and
+// returns the union of their non-stdlib-only import paths. The result
+// is fed into ensureStdImportsInCfg so the compiler can resolve every
+// package the generated code references, even ones the original test
+// source never imported. stdlib packages are included — go list
+// handles them via $GOROOT and extra entries in importcfg are a
+// no-op if the compiler already has them listed.
+func collectGeneratedMockImports(mockFiles []string) ([]string, error) {
+	seen := map[string]bool{}
+	fset := token.NewFileSet()
+	for _, path := range mockFiles {
+		f, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
+		if err != nil {
+			return nil, fmt.Errorf("parsing generated mock %s for imports: %w", path, err)
+		}
+		for _, imp := range f.Imports {
+			p := strings.Trim(imp.Path.Value, `"`)
+			if p == "" {
+				continue
+			}
+			seen[p] = true
+		}
+	}
+	if len(seen) == 0 {
+		return nil, nil
+	}
+	out := make([]string, 0, len(seen))
+	for p := range seen {
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// newRewireTmpDir returns a per-compile scratch directory for generated
+// files (mocks, registration init, rewritten source) plus a cleanup
+// function to call when the compile step is done.
+//
+// Two debug env vars tune the behaviour for interactive troubleshooting
+// of generated code:
+//
+//   - REWIRE_DEBUG_TMPDIR: use the given path instead of a fresh
+//     os.MkdirTemp dir. Lets a user point rewire at a persistent
+//     location (e.g. ./.rewire-debug/) to inspect generated files
+//     across runs. Because the path is user-chosen, it's never
+//     removed by cleanup — the entire point of the override is that
+//     the directory survives the compile, and wiping it would also
+//     delete whatever else the user put there.
+//   - REWIRE_DEBUG_KEEP_TMPDIR: skip the RemoveAll cleanup at end of
+//     compile, even for rewire-created tmp dirs. The kept path is
+//     printed to stderr so the user can find it.
+//
+// Caveat with REWIRE_DEBUG_TMPDIR: parallel compile workers share the
+// directory and filenames are only unique per (interface import path,
+// interface name) — two test binaries that mock different interfaces
+// of the same name will write to the same filename. Fine for
+// inspection, not a substitute for the per-run isolation the default
+// os.MkdirTemp gives.
+//
+// Both default to off. In normal operation the scratch dir is a fresh
+// randomly-named OS tmp dir that's removed when the compile finishes.
+func newRewireTmpDir() (string, func(), error) {
+	var (
+		tmpDir    string
+		userOwned bool
+	)
+	if override := os.Getenv("REWIRE_DEBUG_TMPDIR"); override != "" {
+		if err := os.MkdirAll(override, 0755); err != nil {
+			return "", nil, fmt.Errorf("creating REWIRE_DEBUG_TMPDIR %s: %w", override, err)
+		}
+		tmpDir = override
+		userOwned = true
+	} else {
+		created, err := os.MkdirTemp("", "rewire-*")
+		if err != nil {
+			return "", nil, fmt.Errorf("creating temp dir: %w", err)
+		}
+		tmpDir = created
+	}
+
+	// A user-owned dir is implicitly kept — that's the point of the
+	// override. REWIRE_DEBUG_KEEP_TMPDIR forces keep for rewire-created
+	// dirs too.
+	keep := userOwned || os.Getenv("REWIRE_DEBUG_KEEP_TMPDIR") != ""
+	cleanup := func() {
+		if keep {
+			fmt.Fprintln(os.Stderr, "rewire debug: keeping tmpdir", tmpDir)
+			return
+		}
+		_ = os.RemoveAll(tmpDir)
+	}
+	return tmpDir, cleanup, nil
 }
 
 // packageNameCache memoizes resolvePackageName results for the lifetime
