@@ -423,7 +423,13 @@ func generateInterfaceMocks(compileArgs []string, tmpDir string) ([]string, func
 				return nil, nil, fmt.Errorf("reading source of interface %s.%s: %w", importPath, ifaceName, err)
 			}
 
-			alias := defaultPkgAlias(importPath)
+			alias, err := resolvePackageName(importPath)
+			if err != nil {
+				// Fall back to last-segment heuristic so older setups where
+				// dir name == package name still work when resolution
+				// fails for some reason.
+				alias = defaultPkgAlias(importPath)
+			}
 			for _, inst := range instances {
 				generated, err := mockgen.GenerateRewireMock(srcBytes, ifaceName, importPath, alias, pkgName, inst.TypeArgs, inst.TypeArgImports, resolveInterfaceSource, listPackageExportedTypes)
 				if err != nil {
@@ -552,6 +558,66 @@ func envWithoutGOFLAGS() []string {
 		}
 	}
 	return filtered
+}
+
+// packageNameCache memoizes resolvePackageName results for the lifetime
+// of a single toolexec invocation — same rationale as packageDirCache.
+var packageNameCache sync.Map // importPath (string) → name (string) or error
+
+// resolvePackageName returns the declared package name for importPath
+// — i.e. the identifier from that package's `package <name>`
+// declaration. This is NOT always equal to the last segment of the
+// import path: a directory can be named `foo_bar` while the files
+// inside declare `package foobar`, and a directory can be named `http`
+// while the files declare `package httpcaller`. Treating the last path
+// segment as the package name is the classic cause of "undefined: X"
+// errors in generated code referencing another package.
+//
+// Implementation: parse the first non-test .go file in the package
+// directory in PackageClauseOnly mode. This is cheap (no full-file
+// parse, no subprocess) and authoritative — it reads exactly what the
+// Go compiler would use as the implicit import alias.
+func resolvePackageName(importPath string) (string, error) {
+	if cached, ok := packageNameCache.Load(importPath); ok {
+		switch v := cached.(type) {
+		case string:
+			return v, nil
+		case error:
+			return "", v
+		}
+	}
+
+	name, err := resolvePackageNameUncached(importPath)
+	if err != nil {
+		packageNameCache.Store(importPath, err)
+		return "", err
+	}
+	packageNameCache.Store(importPath, name)
+	return name, nil
+}
+
+func resolvePackageNameUncached(importPath string) (string, error) {
+	pkgDir, err := resolvePackageDir(importPath)
+	if err != nil {
+		return "", err
+	}
+	entries, err := os.ReadDir(pkgDir)
+	if err != nil {
+		return "", err
+	}
+	fset := token.NewFileSet()
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(pkgDir, name), nil, parser.PackageClauseOnly)
+		if err != nil || f == nil || f.Name == nil || f.Name.Name == "" {
+			continue
+		}
+		return f.Name.Name, nil
+	}
+	return "", fmt.Errorf("could not determine package name for %s (no parseable .go files in %s)", importPath, pkgDir)
 }
 
 // resolveInterfaceSource is the InterfaceResolver implementation

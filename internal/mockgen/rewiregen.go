@@ -688,11 +688,17 @@ func collectFlatMethods(
 		// The recursive call's pkgAlias is used to qualify bare
 		// same-package types in the embed's method signatures. For
 		// same-package embeds we reuse the current level's alias; for
-		// cross-package embeds we pick the default last-segment alias
-		// of the embed's package.
+		// cross-package embeds we prefer the embed file's actual
+		// `package X` declaration (which we've already parsed into
+		// embedFile), falling back to the default last-segment alias if
+		// for some reason the parsed name is missing.
 		embedPkgAlias := pkgAlias
 		if embedPkgPath != pkgPath {
-			embedPkgAlias = defaultPkgAlias(embedPkgPath)
+			if embedFile != nil && embedFile.Name != nil && embedFile.Name.Name != "" {
+				embedPkgAlias = embedFile.Name.Name
+			} else {
+				embedPkgAlias = defaultPkgAlias(embedPkgPath)
+			}
 		}
 
 		nested, err := collectFlatMethods(
