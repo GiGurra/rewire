@@ -11,16 +11,17 @@ import (
 
 // mustMatchAll checks that result matches every pattern in patterns.
 // Each pattern is treated as a literal string except for the sentinel
-// `%H`, which expands to `[0-9a-f]+` — used where generated code
-// includes an import-path hash whose exact value tests don't need to
-// assert. Regex metacharacters in the literal portion are escaped so
-// tests can paste raw Go syntax (parens, brackets, braces) without
-// escaping themselves.
+// `%H`, which expands to `[0-9a-f]{8}` — matching the documented
+// width of ShortImportPathHash. Keeping the width explicit means a
+// future change to the hash length (say, going to 6 or 12 chars) is
+// caught by tests rather than silently accepted. Regex metacharacters
+// in the literal portion are escaped so tests can paste raw Go syntax
+// (parens, brackets, braces) without escaping themselves.
 func mustMatchAll(t *testing.T, result string, patterns []string) {
 	t.Helper()
 	for _, p := range patterns {
 		quoted := regexp.QuoteMeta(p)
-		quoted = strings.ReplaceAll(quoted, "%H", "[0-9a-f]+")
+		quoted = strings.ReplaceAll(quoted, "%H", "[0-9a-f]{8}")
 		re := regexp.MustCompile(quoted)
 		if !re.MatchString(result) {
 			t.Errorf("expected output to match %q\n---\n%s", p, result)

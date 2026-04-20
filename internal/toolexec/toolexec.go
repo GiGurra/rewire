@@ -617,23 +617,37 @@ func collectGeneratedMockImports(mockFiles []string) ([]string, error) {
 // Two debug env vars tune the behaviour for interactive troubleshooting
 // of generated code:
 //
-//   - REWIRE_DEBUG_TMPDIR: when set, use the given directory instead of
-//     creating a fresh os.MkdirTemp one. Useful when a user wants to
-//     point rewire at a persistent location (e.g. ./.rewire-debug/) to
-//     inspect generated files across runs.
-//   - REWIRE_DEBUG_KEEP_TMPDIR: when set (to any value), skip the
-//     post-compile RemoveAll so the scratch dir survives the run. The
-//     path is printed to stderr so the user can find it.
+//   - REWIRE_DEBUG_TMPDIR: use the given path instead of a fresh
+//     os.MkdirTemp dir. Lets a user point rewire at a persistent
+//     location (e.g. ./.rewire-debug/) to inspect generated files
+//     across runs. Because the path is user-chosen, it's never
+//     removed by cleanup — the entire point of the override is that
+//     the directory survives the compile, and wiping it would also
+//     delete whatever else the user put there.
+//   - REWIRE_DEBUG_KEEP_TMPDIR: skip the RemoveAll cleanup at end of
+//     compile, even for rewire-created tmp dirs. The kept path is
+//     printed to stderr so the user can find it.
+//
+// Caveat with REWIRE_DEBUG_TMPDIR: parallel compile workers share the
+// directory and filenames are only unique per (interface import path,
+// interface name) — two test binaries that mock different interfaces
+// of the same name will write to the same filename. Fine for
+// inspection, not a substitute for the per-run isolation the default
+// os.MkdirTemp gives.
 //
 // Both default to off. In normal operation the scratch dir is a fresh
 // randomly-named OS tmp dir that's removed when the compile finishes.
 func newRewireTmpDir() (string, func(), error) {
-	var tmpDir string
+	var (
+		tmpDir    string
+		userOwned bool
+	)
 	if override := os.Getenv("REWIRE_DEBUG_TMPDIR"); override != "" {
 		if err := os.MkdirAll(override, 0755); err != nil {
 			return "", nil, fmt.Errorf("creating REWIRE_DEBUG_TMPDIR %s: %w", override, err)
 		}
 		tmpDir = override
+		userOwned = true
 	} else {
 		created, err := os.MkdirTemp("", "rewire-*")
 		if err != nil {
@@ -642,8 +656,12 @@ func newRewireTmpDir() (string, func(), error) {
 		tmpDir = created
 	}
 
+	// A user-owned dir is implicitly kept — that's the point of the
+	// override. REWIRE_DEBUG_KEEP_TMPDIR forces keep for rewire-created
+	// dirs too.
+	keep := userOwned || os.Getenv("REWIRE_DEBUG_KEEP_TMPDIR") != ""
 	cleanup := func() {
-		if os.Getenv("REWIRE_DEBUG_KEEP_TMPDIR") != "" {
+		if keep {
 			fmt.Fprintln(os.Stderr, "rewire debug: keeping tmpdir", tmpDir)
 			return
 		}

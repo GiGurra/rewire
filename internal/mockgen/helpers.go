@@ -19,9 +19,14 @@ import (
 // and short enough to keep mangled struct names readable while
 // disambiguating two packages that happen to share the same declared
 // `package X` identifier.
+//
+// 32 bits is not collision-free in the absolute sense — the birthday
+// bound puts 50% collision probability near ~77k import paths — but
+// it's more than sufficient for practical disambiguation of a single
+// module's dependency graph.
 func ShortImportPathHash(importPath string) string {
 	sum := sha256.Sum256([]byte(importPath))
-	return hex.EncodeToString(sum[:4]) // 8 hex chars → 32 bits → collision-free for any realistic module graph
+	return hex.EncodeToString(sum[:4])
 }
 
 // addResultNames wraps result types with generated names for bare return support.
