@@ -4,6 +4,11 @@ vars:
   REWIRE_GOCACHE: '{{.HOME}}/.cache/rewire-test'
 
 tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+
   build:
     desc: Build all packages
     cmds:
@@ -24,9 +29,18 @@ tasks:
       - go test ./...
 
   test:unit:
-    desc: Run unit tests that don't need toolexec (rewriter, mockgen)
+    desc: Run fast AST-level tests that don't need toolexec (rewriter, mockgen)
     cmds:
       - go test ./internal/rewriter/ ./internal/mockgen/
+
+  test:e2e:
+    desc: Run toolexec + example integration tests with a separate GOCACHE
+    deps: [install]
+    env:
+      GOFLAGS: -toolexec=rewire
+      GOCACHE: '{{.REWIRE_GOCACHE}}'
+    cmds:
+      - go test ./internal/toolexec/ ./example/... -count=1
 
   clean:
     desc: Remove build artifacts and the rewire-specific test cache
