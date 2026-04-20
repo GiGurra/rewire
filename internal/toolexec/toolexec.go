@@ -181,11 +181,10 @@ func findFlag(args []string, flag string) string {
 // For test compilations, it generates a registration file directly from targets.
 func rewriteCompileArgs(args []string, pkgPath string, funcsToMock []string, pkgByInstance map[string]bool, isTest bool, allTargets mockTargets, allInstantiations genericInstantiations, allByInstance byInstanceTargets) ([]string, func(), error) {
 	defer profileStage("rewrite-compile-args", pkgPath)()
-	tmpDir, err := os.MkdirTemp("", "rewire-*")
+	tmpDir, cleanup, err := newRewireTmpDir()
 	if err != nil {
-		return nil, nil, fmt.Errorf("creating temp dir: %w", err)
+		return nil, nil, err
 	}
-	cleanup := func() { _ = os.RemoveAll(tmpDir) }
 
 	newArgs := make([]string, len(args))
 	copy(newArgs, args)
@@ -563,6 +562,48 @@ func envWithoutGOFLAGS() []string {
 		}
 	}
 	return filtered
+}
+
+// newRewireTmpDir returns a per-compile scratch directory for generated
+// files (mocks, registration init, rewritten source) plus a cleanup
+// function to call when the compile step is done.
+//
+// Two debug env vars tune the behaviour for interactive troubleshooting
+// of generated code:
+//
+//   - REWIRE_DEBUG_TMPDIR: when set, use the given directory instead of
+//     creating a fresh os.MkdirTemp one. Useful when a user wants to
+//     point rewire at a persistent location (e.g. ./.rewire-debug/) to
+//     inspect generated files across runs.
+//   - REWIRE_DEBUG_KEEP_TMPDIR: when set (to any value), skip the
+//     post-compile RemoveAll so the scratch dir survives the run. The
+//     path is printed to stderr so the user can find it.
+//
+// Both default to off. In normal operation the scratch dir is a fresh
+// randomly-named OS tmp dir that's removed when the compile finishes.
+func newRewireTmpDir() (string, func(), error) {
+	var tmpDir string
+	if override := os.Getenv("REWIRE_DEBUG_TMPDIR"); override != "" {
+		if err := os.MkdirAll(override, 0755); err != nil {
+			return "", nil, fmt.Errorf("creating REWIRE_DEBUG_TMPDIR %s: %w", override, err)
+		}
+		tmpDir = override
+	} else {
+		created, err := os.MkdirTemp("", "rewire-*")
+		if err != nil {
+			return "", nil, fmt.Errorf("creating temp dir: %w", err)
+		}
+		tmpDir = created
+	}
+
+	cleanup := func() {
+		if os.Getenv("REWIRE_DEBUG_KEEP_TMPDIR") != "" {
+			fmt.Fprintln(os.Stderr, "rewire debug: keeping tmpdir", tmpDir)
+			return
+		}
+		_ = os.RemoveAll(tmpDir)
+	}
+	return tmpDir, cleanup, nil
 }
 
 // packageNameCache memoizes resolvePackageName results for the lifetime
