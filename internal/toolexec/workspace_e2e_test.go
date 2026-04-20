@@ -104,7 +104,16 @@ func TestWorkspaceNewMock(t *testing.T) {
 	testCache := filepath.Join(tmpDir, "gocache")
 	var subEnv []string
 	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "GOFLAGS=") || strings.HasPrefix(e, "GOCACHE=") {
+		// Strip any inherited workspace / cache / flags overrides so
+		// the subprocess's view of the world is exactly tmpDir's
+		// go.work. GOWORK is the important one here — a parent shell
+		// with GOWORK set (or a dev who exports one for their own
+		// workspace) would otherwise point go at that file instead
+		// of tmpDir/go.work, silently making the test assert against
+		// the wrong root.
+		if strings.HasPrefix(e, "GOFLAGS=") ||
+			strings.HasPrefix(e, "GOCACHE=") ||
+			strings.HasPrefix(e, "GOWORK=") {
 			continue
 		}
 		subEnv = append(subEnv, e)
