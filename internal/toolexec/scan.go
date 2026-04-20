@@ -386,7 +386,16 @@ func scanFileForMockCalls(path string) (mockTargets, genericInstantiations, byIn
 		return nil, nil, nil, nil
 	}
 
-	// Build import map: local name → import path
+	// Build import map: local name → import path.
+	//
+	// For imports with an explicit alias (`foo "pkg/path"`), the alias
+	// is the local name. For imports without one, the local name is the
+	// imported package's declared `package X` identifier — NOT the last
+	// segment of the import path. These only diverge when the directory
+	// name differs from the package name (e.g. dir `http` declaring
+	// `package httpcaller`), but when they do, falling back to the last
+	// segment causes the scanner to miss NewMock / Func references that
+	// use the real package name as the qualifier.
 	imports := map[string]string{}
 	rewireLocalName := ""
 	for _, imp := range f.Imports {
@@ -394,6 +403,8 @@ func scanFileForMockCalls(path string) (mockTargets, genericInstantiations, byIn
 		var localName string
 		if imp.Name != nil {
 			localName = imp.Name.Name
+		} else if name, err := resolvePackageName(importPath); err == nil {
+			localName = name
 		} else {
 			segments := strings.Split(importPath, "/")
 			localName = segments[len(segments)-1]
