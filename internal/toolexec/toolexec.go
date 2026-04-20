@@ -140,15 +140,46 @@ func hasTestFiles(args []string) bool {
 }
 
 // findModuleInfo returns the module path and root directory.
+// findModuleInfo walks up from the current working directory looking
+// for a go.mod (single-module case) or go.work (multi-module workspace
+// case) and returns the module path plus the directory that should be
+// treated as the scan root.
+//
+// Single-module (go.mod found first): moduleRoot is the module's
+// directory and modulePath is parsed out of the `module ...` line.
+//
+// Workspace (go.work found before any go.mod): moduleRoot is the
+// directory containing go.work, and modulePath is blank (the
+// workspace doesn't have a single module path). The scan walker
+// still works correctly on this root — filepath.WalkDir descends
+// into every `use`-listed module's source tree plus any unrelated
+// sibling directories.
+//
+// Without the go.work branch, `go test ./a/... ./b/...` invoked from
+// the workspace root (retail-mono's CI shape) caused findModuleInfo
+// to walk past the workspace looking for a go.mod that doesn't exist
+// at that level, return empty, and skip the scan entirely — meaning
+// no NewMock references were ever discovered and tests failed at
+// runtime with "no mock factory registered".
 func findModuleInfo() (modulePath string, moduleRoot string) {
 	dir, err := os.Getwd()
 	if err != nil {
 		return "", ""
 	}
 	for {
-		data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
-		if err == nil {
+		// Prefer go.mod: it gives us both the module path and a
+		// concrete directory. If a nested module and a workspace
+		// coexist (e.g. running tests from inside a workspace
+		// member), the module's own go.mod wins — which is what
+		// single-module mode already did.
+		if data, err := os.ReadFile(filepath.Join(dir, "go.mod")); err == nil {
 			return parseModulePath(string(data)), dir
+		}
+		// Fall back to go.work: the invoking shell is at a
+		// multi-module workspace root. Scanning this directory
+		// recursively covers every module the workspace composes.
+		if _, err := os.Stat(filepath.Join(dir, "go.work")); err == nil {
+			return "", dir
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
