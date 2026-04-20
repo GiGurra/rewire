@@ -2,6 +2,8 @@ package mockgen
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -9,6 +11,18 @@ import (
 	"go/token"
 	"strings"
 )
+
+// ShortImportPathHash returns an 8-hex-char slice of SHA256(importPath),
+// suitable for embedding into a generated Go identifier. It's
+// deterministic (same path always hashes the same, so generated struct
+// names are stable across runs and across parallel compile workers)
+// and short enough to keep mangled struct names readable while
+// disambiguating two packages that happen to share the same declared
+// `package X` identifier.
+func ShortImportPathHash(importPath string) string {
+	sum := sha256.Sum256([]byte(importPath))
+	return hex.EncodeToString(sum[:4]) // 8 hex chars → 32 bits → collision-free for any realistic module graph
+}
 
 // addResultNames wraps result types with generated names for bare return support.
 // "(string, error)" → "(_r0 string, _r1 error)"

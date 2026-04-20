@@ -435,7 +435,12 @@ func generateInterfaceMocks(compileArgs []string, tmpDir string) ([]string, func
 				if err != nil {
 					return nil, nil, fmt.Errorf("generating mock for %s.%s%s: %w", importPath, ifaceName, formatTypeArgs(inst.TypeArgs), err)
 				}
-				outPath := filepath.Join(tmpDir, fmt.Sprintf("_rewire_mock_%s_%s%s_test.go", alias, ifaceName, mangleTypeArgs(inst.TypeArgs)))
+				// Include a hash of the full import path in the filename
+				// so two packages that share the same declared name (e.g.
+				// both declaring `package caller` at different paths)
+				// don't write to the same output file — the second would
+				// otherwise silently overwrite the first.
+				outPath := filepath.Join(tmpDir, fmt.Sprintf("_rewire_mock_%s_%s_%s%s_test.go", alias, mockgen.ShortImportPathHash(importPath), ifaceName, mangleTypeArgs(inst.TypeArgs)))
 				if err := os.WriteFile(outPath, generated, 0644); err != nil {
 					return nil, nil, fmt.Errorf("writing generated mock file: %w", err)
 				}

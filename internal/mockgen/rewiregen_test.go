@@ -4,9 +4,29 @@ import (
 	"fmt"
 	"go/parser"
 	"go/token"
+	"regexp"
 	"strings"
 	"testing"
 )
+
+// mustMatchAll checks that result matches every pattern in patterns.
+// Each pattern is treated as a literal string except for the sentinel
+// `%H`, which expands to `[0-9a-f]+` — used where generated code
+// includes an import-path hash whose exact value tests don't need to
+// assert. Regex metacharacters in the literal portion are escaped so
+// tests can paste raw Go syntax (parens, brackets, braces) without
+// escaping themselves.
+func mustMatchAll(t *testing.T, result string, patterns []string) {
+	t.Helper()
+	for _, p := range patterns {
+		quoted := regexp.QuoteMeta(p)
+		quoted = strings.ReplaceAll(quoted, "%H", "[0-9a-f]+")
+		re := regexp.MustCompile(quoted)
+		if !re.MatchString(result) {
+			t.Errorf("expected output to match %q\n---\n%s", p, result)
+		}
+	}
+}
 
 func TestGenerateRewireMock_Simple(t *testing.T) {
 	src := []byte(`package bar
@@ -33,20 +53,16 @@ type GreeterIface interface {
 		`"sync"`,
 		`"github.com/GiGurra/rewire/pkg/rewire"`,
 		`"github.com/example/bar"`,
-		`type _rewire_mock_bar_GreeterIface struct{ _ [1]byte }`,
-		`var Mock__rewire_mock_bar_GreeterIface_Greet_ByInstance sync.Map`,
-		`func (m *_rewire_mock_bar_GreeterIface) Greet(name string) (_r0 string)`,
-		`Mock__rewire_mock_bar_GreeterIface_Greet_ByInstance.Load(m)`,
+		`type _rewire_mock_bar_%H_GreeterIface struct{ _ [1]byte }`,
+		`var Mock__rewire_mock_bar_%H_GreeterIface_Greet_ByInstance sync.Map`,
+		`func (m *_rewire_mock_bar_%H_GreeterIface) Greet(name string) (_r0 string)`,
+		`Mock__rewire_mock_bar_%H_GreeterIface_Greet_ByInstance.Load(m)`,
 		`_rewire_raw.(func(bar.GreeterIface, string) string)`,
 		`_rewire_fn(m, name)`,
-		`rewire.RegisterMockFactory[bar.GreeterIface](func() any { return &_rewire_mock_bar_GreeterIface{} })`,
+		`rewire.RegisterMockFactory[bar.GreeterIface](func() any { return &_rewire_mock_bar_%H_GreeterIface{} })`,
 		`rewire.RegisterByInstance("github.com/example/bar.GreeterIface.Greet"`,
 	}
-	for _, s := range mustContain {
-		if !strings.Contains(result, s) {
-			t.Errorf("expected output to contain %q\n---\n%s", s, result)
-		}
-	}
+	mustMatchAll(t, result, mustContain)
 }
 
 func TestGenerateRewireMock_MultipleMethods_NoReturn(t *testing.T) {
@@ -115,9 +131,9 @@ type Bigger interface {
 	// All three methods must be present — the receiver is always the
 	// ROOT interface (Bigger), even for promoted methods.
 	mustContain := []string{
-		`func (m *_rewire_mock_bar_Bigger) Read(p []byte) (_r0 int, _r1 error)`,
-		`func (m *_rewire_mock_bar_Bigger) Close() (_r0 error)`,
-		`func (m *_rewire_mock_bar_Bigger) Name() (_r0 string)`,
+		`func (m *_rewire_mock_bar_%H_Bigger) Read(p []byte) (_r0 int, _r1 error)`,
+		`func (m *_rewire_mock_bar_%H_Bigger) Close() (_r0 error)`,
+		`func (m *_rewire_mock_bar_%H_Bigger) Name() (_r0 string)`,
 		// Registration uses Bigger, not ReaderCloser — runtime.FuncForPC
 		// reports method expressions as `pkg.Outer.Method` even for
 		// promoted methods.
@@ -125,11 +141,7 @@ type Bigger interface {
 		`rewire.RegisterByInstance("example/bar.Bigger.Close"`,
 		`rewire.RegisterByInstance("example/bar.Bigger.Name"`,
 	}
-	for _, s := range mustContain {
-		if !strings.Contains(result, s) {
-			t.Errorf("expected output to contain %q\n---\n%s", s, result)
-		}
-	}
+	mustMatchAll(t, result, mustContain)
 }
 
 // Cross-file / cross-package embed via a stub resolver. Simulates
@@ -170,18 +182,14 @@ type Reader interface {
 	}
 
 	mustContain := []string{
-		`func (m *_rewire_mock_bar_Closeable) Read(p []byte) (_r0 int, _r1 error)`,
-		`func (m *_rewire_mock_bar_Closeable) Close() (_r0 error)`,
+		`func (m *_rewire_mock_bar_%H_Closeable) Read(p []byte) (_r0 int, _r1 error)`,
+		`func (m *_rewire_mock_bar_%H_Closeable) Close() (_r0 error)`,
 		// The registration keys use the OUTER interface's pkgPath and
 		// name, not extio.Reader's.
 		`rewire.RegisterByInstance("example/bar.Closeable.Read"`,
 		`rewire.RegisterByInstance("example/bar.Closeable.Close"`,
 	}
-	for _, s := range mustContain {
-		if !strings.Contains(result, s) {
-			t.Errorf("expected output to contain %q\n---\n%s", s, result)
-		}
-	}
+	mustMatchAll(t, result, mustContain)
 }
 
 // Generic embed with type-parameter flow: Outer[U] embeds Base[U], so
@@ -213,16 +221,12 @@ type Outer[U any] interface {
 	mustContain := []string{
 		// The promoted Get method has U → int flowing through via
 		// Base[U] → Base[int]. The generated method returns int.
-		`func (m *_rewire_mock_bar_Outer_int) Get(id int) (_r0 int)`,
-		`func (m *_rewire_mock_bar_Outer_int) List() (_r0 []int)`,
+		`func (m *_rewire_mock_bar_%H_Outer_int) Get(id int) (_r0 int)`,
+		`func (m *_rewire_mock_bar_%H_Outer_int) List() (_r0 []int)`,
 		// Receiver type in the mockFnType uses the ROOT Outer[int], not Base[int].
 		`_rewire_raw.(func(bar.Outer[int], int) int)`,
 	}
-	for _, s := range mustContain {
-		if !strings.Contains(result, s) {
-			t.Errorf("expected output to contain %q\n---\n%s", s, result)
-		}
-	}
+	mustMatchAll(t, result, mustContain)
 }
 
 // Nil resolver with a cross-package embed → clear error referencing
@@ -308,23 +312,19 @@ type Container[T any] interface {
 
 	mustContain := []string{
 		// Mangled struct name carries the instantiation suffix.
-		`type _rewire_mock_bar_Container_int struct{ _ [1]byte }`,
+		`type _rewire_mock_bar_%H_Container_int struct{ _ [1]byte }`,
 		// Method signatures have T → int substituted.
-		`func (m *_rewire_mock_bar_Container_int) Add(v int)`,
-		`func (m *_rewire_mock_bar_Container_int) Get(i int) (_r0 int)`,
-		`func (m *_rewire_mock_bar_Container_int) Len() (_r0 int)`,
+		`func (m *_rewire_mock_bar_%H_Container_int) Add(v int)`,
+		`func (m *_rewire_mock_bar_%H_Container_int) Get(i int) (_r0 int)`,
+		`func (m *_rewire_mock_bar_%H_Container_int) Len() (_r0 int)`,
 		// mockFnType uses the instantiated interface.
 		`_rewire_raw.(func(bar.Container[int], int))`,
 		// Factory registration uses the instantiated interface as type param.
-		`rewire.RegisterMockFactory[bar.Container[int]](func() any { return &_rewire_mock_bar_Container_int{} })`,
+		`rewire.RegisterMockFactory[bar.Container[int]](func() any { return &_rewire_mock_bar_%H_Container_int{} })`,
 		// RegisterByInstance uses the witness pattern with typed nil.
-		`rewire.RegisterByInstance("github.com/example/bar.Container.Add", &Mock__rewire_mock_bar_Container_int_Add_ByInstance, (func(bar.Container[int], int))(nil))`,
+		`rewire.RegisterByInstance("github.com/example/bar.Container.Add", &Mock__rewire_mock_bar_%H_Container_int_Add_ByInstance, (func(bar.Container[int], int))(nil))`,
 	}
-	for _, s := range mustContain {
-		if !strings.Contains(result, s) {
-			t.Errorf("expected output to contain %q\n---\n%s", s, result)
-		}
-	}
+	mustMatchAll(t, result, mustContain)
 }
 
 // Type-arg packages overlapping with the interface declaring file's
@@ -425,19 +425,15 @@ type Service interface {
 	mustContain := []string{
 		// Bare `*Widget` became `*bar.Widget`, including inside the
 		// slice type and as a parameter.
-		`func (m *_rewire_mock_bar_Service) MakeWidget() (_r0 *bar.Widget)`,
-		`func (m *_rewire_mock_bar_Service) Rename(w *bar.Widget, name string) (_r0 *bar.Widget)`,
-		`func (m *_rewire_mock_bar_Service) List() (_r0 []bar.Widget)`,
+		`func (m *_rewire_mock_bar_%H_Service) MakeWidget() (_r0 *bar.Widget)`,
+		`func (m *_rewire_mock_bar_%H_Service) Rename(w *bar.Widget, name string) (_r0 *bar.Widget)`,
+		`func (m *_rewire_mock_bar_%H_Service) List() (_r0 []bar.Widget)`,
 		// The mockFnType signatures likewise use the qualified form.
 		`_rewire_raw.(func(bar.Service) *bar.Widget)`,
 		`_rewire_raw.(func(bar.Service, *bar.Widget, string) *bar.Widget)`,
 		`_rewire_raw.(func(bar.Service) []bar.Widget)`,
 	}
-	for _, s := range mustContain {
-		if !strings.Contains(result, s) {
-			t.Errorf("expected output to contain %q\n---\n%s", s, result)
-		}
-	}
+	mustMatchAll(t, result, mustContain)
 }
 
 // When the same-package qualifier wants to add an import for the
@@ -525,17 +521,13 @@ type Holder[T any] interface {
 
 	mustContain := []string{
 		// T substituted with test-pkg *Widget — stays bare.
-		`func (m *_rewire_mock_bar_Holder_ptr_Widget) Get() (_r0 *Widget)`,
+		`func (m *_rewire_mock_bar_%H_Holder_ptr_Widget) Get() (_r0 *Widget)`,
 		// Same-pkg Gadget → bar.Gadget.
-		`func (m *_rewire_mock_bar_Holder_ptr_Widget) MakeGadget() (_r0 *bar.Gadget)`,
+		`func (m *_rewire_mock_bar_%H_Holder_ptr_Widget) MakeGadget() (_r0 *bar.Gadget)`,
 		// Mix: test-pkg *Widget + qualified *bar.Gadget.
-		`func (m *_rewire_mock_bar_Holder_ptr_Widget) Store(v *Widget, g *bar.Gadget)`,
+		`func (m *_rewire_mock_bar_%H_Holder_ptr_Widget) Store(v *Widget, g *bar.Gadget)`,
 	}
-	for _, s := range mustContain {
-		if !strings.Contains(result, s) {
-			t.Errorf("expected output to contain %q\n---\n%s", s, result)
-		}
-	}
+	mustMatchAll(t, result, mustContain)
 }
 
 // Dot imports: an interface file with `import . "pkg"` brings
@@ -578,16 +570,12 @@ type Service interface {
 	mustContain := []string{
 		// Reader → io.Reader, Closer → io.Closer (the dot-imported
 		// alias, not bar.Reader / bar.Closer).
-		`func (m *_rewire_mock_bar_Service) Open() (_r0 io.Reader)`,
-		`func (m *_rewire_mock_bar_Service) CloseAll(cs []io.Closer)`,
+		`func (m *_rewire_mock_bar_%H_Service) Open() (_r0 io.Reader)`,
+		`func (m *_rewire_mock_bar_%H_Service) CloseAll(cs []io.Closer)`,
 		// The dot-imported package shows up in the import block.
 		`"example.com/io"`,
 	}
-	for _, s := range mustContain {
-		if !strings.Contains(result, s) {
-			t.Errorf("expected output to contain %q\n---\n%s", s, result)
-		}
-	}
+	mustMatchAll(t, result, mustContain)
 
 	// bar.Reader / bar.Closer should NOT appear anywhere — these
 	// would indicate we qualified with the wrong package.
@@ -645,14 +633,10 @@ type Wrapper interface {
 
 	// Read was promoted from the dot-imported io.Reader.
 	mustContain := []string{
-		`func (m *_rewire_mock_bar_Wrapper) Read(p []byte) (_r0 int, _r1 error)`,
-		`func (m *_rewire_mock_bar_Wrapper) Extra() (_r0 string)`,
+		`func (m *_rewire_mock_bar_%H_Wrapper) Read(p []byte) (_r0 int, _r1 error)`,
+		`func (m *_rewire_mock_bar_%H_Wrapper) Extra() (_r0 string)`,
 	}
-	for _, s := range mustContain {
-		if !strings.Contains(result, s) {
-			t.Errorf("expected output to contain %q\n---\n%s", s, result)
-		}
-	}
+	mustMatchAll(t, result, mustContain)
 }
 
 // A file without any dot imports must not call the typeLister at
@@ -723,19 +707,15 @@ type Cache[K comparable, V any] interface {
 	}
 
 	mustContain := []string{
-		`type _rewire_mock_bar_Cache_string_int struct{ _ [1]byte }`,
+		`type _rewire_mock_bar_%H_Cache_string_int struct{ _ [1]byte }`,
 		// K → string, V → int substituted in both methods.
-		`func (m *_rewire_mock_bar_Cache_string_int) Set(k string, v int)`,
-		`func (m *_rewire_mock_bar_Cache_string_int) Get(k string) (_r0 int, _r1 bool)`,
+		`func (m *_rewire_mock_bar_%H_Cache_string_int) Set(k string, v int)`,
+		`func (m *_rewire_mock_bar_%H_Cache_string_int) Get(k string) (_r0 int, _r1 bool)`,
 		// Instantiated factory.
-		`rewire.RegisterMockFactory[bar.Cache[string, int]](func() any { return &_rewire_mock_bar_Cache_string_int{} })`,
+		`rewire.RegisterMockFactory[bar.Cache[string, int]](func() any { return &_rewire_mock_bar_%H_Cache_string_int{} })`,
 		// mockFnType has both type args substituted.
 		`_rewire_raw.(func(bar.Cache[string, int], string, int))`,
 		`_rewire_raw.(func(bar.Cache[string, int], string) (int, bool))`,
 	}
-	for _, s := range mustContain {
-		if !strings.Contains(result, s) {
-			t.Errorf("expected output to contain %q\n---\n%s", s, result)
-		}
-	}
+	mustMatchAll(t, result, mustContain)
 }
