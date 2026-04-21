@@ -60,7 +60,7 @@ s1 := &bar.Server{Name: "primary"}
 s2 := &bar.Server{Name: "secondary"}
 
 e := expect.ForInstance(t, s1, (*bar.Server).Handle)
-e.On(s1, "ping").Returns("pong from primary")
+e.On("ping").Returns("pong from primary")
 e.OnAny().Returns("primary-fallback")
 
 s1.Handle("ping")   // "pong from primary"   — matched rule on e
@@ -68,7 +68,7 @@ s1.Handle("other")  // "primary-fallback"    — .OnAny() on e
 s2.Handle("ping")   // real Handle body      — s2 has no expectation
 ```
 
-Note the first argument to `.On(...)` is the receiver itself (`s1`), matching the method expression's signature `func(*bar.Server, string) string`.
+The receiver is pinned to `s1` at install time, so `.On(...)` takes the method's *non-receiver* args only — just `"ping"` here, not `(s1, "ping")`. The same elision applies to `.Match(predicate)`: the predicate's signature drops the receiver parameter. (`DoFunc`'s callback is still typed `F` by Go and must include the receiver — name it `_` if you don't need it.)
 
 ### Interface method via `rewire.NewMock`
 
@@ -76,8 +76,8 @@ Note the first argument to `.On(...)` is the receiver itself (`s1`), matching th
 greeter := rewire.NewMock[bar.GreeterIface](t)
 
 e := expect.ForInstance(t, greeter, bar.GreeterIface.Greet)
-e.On(greeter, "Alice").Returns("hi Alice")
-e.Match(func(g bar.GreeterIface, name string) bool {
+e.On("Alice").Returns("hi Alice")
+e.Match(func(name string) bool {
     return strings.HasPrefix(name, "admin_")
 }).Returns("admin")
 e.OnAny().Returns("hi other")

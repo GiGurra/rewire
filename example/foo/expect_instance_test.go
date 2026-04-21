@@ -11,12 +11,16 @@ import (
 
 // Per-instance concrete method: two *Greeter instances, expectation
 // scoped to one. The other runs the real method body.
+//
+// Rule args are given WITHOUT the receiver — ForInstance pins it at
+// install time, so .On("Alice") here targets g1.Greet("Alice"), not
+// any *Greeter.Greet("Alice").
 func TestExpectForInstance_ConcreteMethod_Scoped(t *testing.T) {
 	g1 := &bar.Greeter{Prefix: "Hi"}
 	g2 := &bar.Greeter{Prefix: "Hello"}
 
 	e := expect.ForInstance(t, g1, (*bar.Greeter).Greet)
-	e.On(g1, "Alice").Returns("g1-expect: Alice")
+	e.On("Alice").Returns("g1-expect: Alice")
 	e.OnAny().Returns("g1-catchall")
 
 	if got := g1.Greet("Alice"); got != "g1-expect: Alice" {
@@ -32,12 +36,15 @@ func TestExpectForInstance_ConcreteMethod_Scoped(t *testing.T) {
 
 // Expectation on an interface method via NewMock. No go:generate, no
 // committed mock files — the test just references the interface.
+//
+// Match's predicate takes the method's non-receiver parameters only —
+// the receiver is pinned and not passed in.
 func TestExpectForInstance_InterfaceMethod_ViaNewMock(t *testing.T) {
 	greeter := rewire.NewMock[bar.GreeterIface](t)
 
 	e := expect.ForInstance(t, greeter, bar.GreeterIface.Greet)
-	e.On(greeter, "Alice").Returns("mock: Alice")
-	e.Match(func(g bar.GreeterIface, name string) bool {
+	e.On("Alice").Returns("mock: Alice")
+	e.Match(func(name string) bool {
 		return strings.HasPrefix(name, "admin_")
 	}).Returns("mock: admin")
 	e.OnAny().Returns("mock: other")
@@ -76,12 +83,16 @@ func TestExpectForInstance_TwoMocksIndependent(t *testing.T) {
 // DoFunc captures arguments into the test body — a common spy pattern
 // that also exercises the typed-callback response path through
 // InstanceFunc dispatch.
+//
+// Unlike .On / .Match, DoFunc's callback must have the method's full
+// signature (the compiler enforces type F). The receiver is still
+// there; name it `_` if you don't need it.
 func TestExpectForInstance_DoFuncSpy(t *testing.T) {
 	greeter := rewire.NewMock[bar.GreeterIface](t)
 
 	var seen []string
 	e := expect.ForInstance(t, greeter, bar.GreeterIface.Greet)
-	e.OnAny().DoFunc(func(g bar.GreeterIface, name string) string {
+	e.OnAny().DoFunc(func(_ bar.GreeterIface, name string) string {
 		seen = append(seen, name)
 		return "seen: " + name
 	})
@@ -101,9 +112,28 @@ func TestExpectForInstance_CallCountBounds(t *testing.T) {
 	greeter := rewire.NewMock[bar.GreeterIface](t)
 
 	e := expect.ForInstance(t, greeter, bar.GreeterIface.Greet)
-	e.On(greeter, "Alice").Returns("hi").Times(2)
+	e.On("Alice").Returns("hi").Times(2)
 
 	greeter.Greet("Alice")
 	greeter.Greet("Alice")
 	// Two calls — matches the Times(2) bound.
+}
+
+// Mix per-arg matchers with the elided-receiver signature: On takes
+// args for the method's non-receiver positions only, and the matcher
+// sentinels work exactly like they do on For.
+func TestExpectForInstance_PerArgMatchers(t *testing.T) {
+	greeter := rewire.NewMock[bar.GreeterIface](t)
+
+	e := expect.ForInstance(t, greeter, bar.GreeterIface.Greet)
+	e.On(expect.ArgThat(func(name string) bool { return strings.HasPrefix(name, "admin_") })).
+		Returns("admin greeting")
+	e.On(expect.Any()).Returns("default").Maybe()
+
+	if got := greeter.Greet("admin_root"); got != "admin greeting" {
+		t.Errorf("ArgThat accepted: got %q", got)
+	}
+	if got := greeter.Greet("Alice"); got != "default" {
+		t.Errorf("Any() fallback: got %q", got)
+	}
 }

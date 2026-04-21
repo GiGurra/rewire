@@ -55,6 +55,18 @@ type Expectation[F any] struct {
 	fnType   reflect.Type // reflect.TypeOf(original)
 	realFn   F            // captured at construction for AllowUnmatched passthrough
 
+	// elideReceiver is set by ForInstance. When true, .On(args...) and
+	// .Match(predicate) treat the target signature as if the receiver
+	// parameter didn't exist: callers pass args / predicate-params for
+	// positions 1..N only. Internally the rule matcher still sees the
+	// full arg list the dispatcher hands it, so .On prepends an implicit
+	// Any() for the receiver slot and .Match wraps the predicate so the
+	// receiver arg is dropped before the user's predicate runs. The
+	// receiver is already pinned to a specific instance at install time
+	// (via rewire.InstanceFunc), so requiring callers to restate it at
+	// every rule would be noise.
+	elideReceiver bool
+
 	mu             sync.Mutex
 	rules          []*Rule[F]
 	allowUnmatched bool
@@ -136,6 +148,13 @@ func For[F any](t *testing.T, target F) *Expectation[F] {
 //     Calls from other instances still see the global mock (if any)
 //     or the real implementation.
 //
+//   - The receiver parameter is elided from the rule-builder API.
+//     .On(args...) and .Match(predicate) operate on positions 1..N
+//     of the method expression's signature; the receiver is implicitly
+//     pinned to `instance` at install time. So the example above uses
+//     .On("Alice") instead of .On(greeter, "Alice"). The dispatcher
+//     still sees the full arg list internally.
+//
 //   - The real implementation is NOT captured. Interface method
 //     expressions have no registered real, and for per-instance
 //     concrete method mocks the "fallthrough to real" semantic is
@@ -150,6 +169,12 @@ func ForInstance[I any, F any](t *testing.T, instance I, target F) *Expectation[
 	if e == nil {
 		return nil
 	}
+
+	// Elide the receiver slot from the rule-builder API: .On / .Match
+	// callers provide args for the method's non-receiver parameters only.
+	// The receiver is already pinned to `instance` via InstanceFunc
+	// below, so re-stating it at every rule would be noise.
+	e.elideReceiver = true
 
 	// Intentionally do NOT capture rewire.Real(t, target) here:
 	// interface method expressions have no registered real, and for
@@ -219,12 +244,22 @@ func (e *Expectation[F]) AllowUnmatched() *Expectation[F] {
 // verification fails at t.Cleanup. Override with .Maybe() for optional.
 func (e *Expectation[F]) On(args ...any) *Rule[F] {
 	e.t.Helper()
-	if err := validateLiteralArgs(e.fnType, args); err != nil {
+	userArgs := args
+	effectiveArgs := args
+	if e.elideReceiver {
+		// Expectations from ForInstance take args for the non-receiver
+		// positions only. Prepend an implicit Any() for the receiver
+		// so the validator + matcher see the full fnType arity.
+		effectiveArgs = make([]any, 0, len(args)+1)
+		effectiveArgs = append(effectiveArgs, Any())
+		effectiveArgs = append(effectiveArgs, args...)
+	}
+	if err := validateLiteralArgs(e.fnType, effectiveArgs); err != nil {
 		e.t.Fatalf("rewire/expect: %s: %s", e.name, err)
 		return nil
 	}
-	entries := make([]argEntry, len(args))
-	for i, a := range args {
+	entries := make([]argEntry, len(effectiveArgs))
+	for i, a := range effectiveArgs {
 		if m, ok := a.(ArgMatcher); ok {
 			entries[i] = argEntry{matcher: m}
 			continue
@@ -235,7 +270,9 @@ func (e *Expectation[F]) On(args ...any) *Rule[F] {
 		}
 		entries[i] = argEntry{literal: reflect.ValueOf(a)}
 	}
-	descr := ".On(" + formatArgsInterface(args) + ")"
+	// Describe using the user-visible args so the rendered rule doesn't
+	// expose the auto-prepended Any() when elision is active.
+	descr := ".On(" + formatArgsInterface(userArgs) + ")"
 	r := &Rule[F]{
 		parent:  e,
 		matcher: &literalMatcher{entries: entries, descr: descr},
@@ -254,15 +291,31 @@ func (e *Expectation[F]) On(args ...any) *Rule[F] {
 // Defaults to strict: the rule must match at least one call.
 func (e *Expectation[F]) Match(predicate any) *Rule[F] {
 	e.t.Helper()
-	predType, err := validatePredicate(e.fnType, predicate)
+	// The predicate is validated against the effective signature —
+	// fnType minus the receiver when this expectation came from
+	// ForInstance, fnType unchanged otherwise.
+	expectedType := e.fnType
+	if e.elideReceiver {
+		expectedType = elidedReceiverType(e.fnType)
+	}
+	predType, err := validatePredicate(expectedType, predicate)
 	if err != nil {
 		e.t.Fatalf("rewire/expect: %s: %s", e.name, err)
 		return nil
 	}
+	// The dispatcher invokes matchers with the full arg list (receiver
+	// included). When the user supplied a predicate without a receiver
+	// parameter, wrap it so the receiver is dropped before the user's
+	// predicate runs. The wrapper has type matching fnType's In()s with
+	// a bool return, which is exactly what predicateMatcher expects.
+	matcherFn := reflect.ValueOf(predicate)
+	if e.elideReceiver {
+		matcherFn = wrapPredicateElideReceiver(e.fnType, reflect.ValueOf(predicate))
+	}
 	r := &Rule[F]{
 		parent: e,
 		matcher: &predicateMatcher{
-			fn:    reflect.ValueOf(predicate),
+			fn:    matcherFn,
 			descr: ".Match(" + predType.String() + ")",
 		},
 		bound: bound{kind: boundAtLeast, n: 1}, // strict default
@@ -270,6 +323,48 @@ func (e *Expectation[F]) Match(predicate any) *Rule[F] {
 	}
 	e.appendRule(r)
 	return r
+}
+
+// elidedReceiverType returns fnType with its first input parameter
+// removed, preserving returns and variadic-ness. Used by ForInstance
+// expectations so .On / .Match validate against the user-visible
+// (non-receiver) signature.
+func elidedReceiverType(fnType reflect.Type) reflect.Type {
+	n := fnType.NumIn()
+	if n == 0 {
+		return fnType
+	}
+	ins := make([]reflect.Type, n-1)
+	for i := 1; i < n; i++ {
+		ins[i-1] = fnType.In(i)
+	}
+	outs := make([]reflect.Type, fnType.NumOut())
+	for i := 0; i < fnType.NumOut(); i++ {
+		outs[i] = fnType.Out(i)
+	}
+	// Only propagate variadic-ness if the variadic slot wasn't the
+	// receiver (which it can't be in practice; receivers are always
+	// concrete types) AND there's at least one remaining param for
+	// reflect.FuncOf to treat as variadic.
+	variadic := fnType.IsVariadic() && n > 1
+	return reflect.FuncOf(ins, outs, variadic)
+}
+
+// wrapPredicateElideReceiver builds a synthetic predicate whose type
+// matches fnType's full In() list but returns bool. At call time it
+// discards the first argument (the receiver) and invokes the user's
+// predicate with the remaining args. The result is a reflect.Value
+// that predicateMatcher can store and call uniformly, with the
+// dispatcher's full-arg list.
+func wrapPredicateElideReceiver(fnType reflect.Type, userPred reflect.Value) reflect.Value {
+	ins := make([]reflect.Type, fnType.NumIn())
+	for i := 0; i < fnType.NumIn(); i++ {
+		ins[i] = fnType.In(i)
+	}
+	synthType := reflect.FuncOf(ins, []reflect.Type{reflect.TypeOf(true)}, fnType.IsVariadic())
+	return reflect.MakeFunc(synthType, func(args []reflect.Value) []reflect.Value {
+		return userPred.Call(args[1:])
+	})
 }
 
 // OnAny begins a new catch-all rule that matches every call. Useful as
