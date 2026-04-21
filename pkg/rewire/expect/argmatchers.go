@@ -97,14 +97,33 @@ type argThatArg struct {
 }
 
 func (m argThatArg) matchArg(arg reflect.Value) bool {
-	// The registration-time check guarantees arg's type is assignable
-	// to the predicate's input; Convert handles the common case where
-	// the method signature uses a narrower concrete type than the
-	// predicate's declared T (rare but not impossible with embedded
-	// interfaces).
+	if !arg.IsValid() {
+		// Zero reflect.Value — nothing to hand to the predicate.
+		return false
+	}
 	in := arg
-	if in.IsValid() && in.Type() != m.in {
-		in = in.Convert(m.in)
+	// When the target parameter is an interface type (e.g. `any` or
+	// `io.Reader`) the reflect.Value received here carries the
+	// interface wrapper. Unwrap so the predicate sees the dynamic
+	// value, not the boxed interface. For concrete-typed parameters
+	// this branch is a no-op.
+	if in.Kind() == reflect.Interface {
+		in = in.Elem()
+		if !in.IsValid() {
+			// nil interface value — no concrete value to test.
+			return false
+		}
+	}
+	// Registration only guarantees `m.in.AssignableTo(paramType)`
+	// (matcher valid at this position). At runtime, the call's
+	// dynamic type may be a sibling that's NOT assignable to m.in
+	// (e.g. target is `func(any)`, predicate is `func(string) bool`,
+	// and the actual call passed an int). In that case the matcher
+	// legitimately doesn't apply — report no-match rather than
+	// coercing via Convert (which either panics or produces
+	// semantically wrong data for numeric/int-to-string cases).
+	if !in.Type().AssignableTo(m.in) {
+		return false
 	}
 	return m.pred.Call([]reflect.Value{in})[0].Bool()
 }

@@ -78,6 +78,65 @@ func TestLiteralMatcher_ArgThatSentinel(t *testing.T) {
 	}
 }
 
+// Registration permits ArgThat[string] at an `any` parameter position
+// (string is assignable to any). At runtime the concrete dynamic type
+// may be something other than string — the predicate simply doesn't
+// apply, and we must report no-match rather than panic or coerce.
+func TestArgThat_InterfaceParam_WrongDynamicType(t *testing.T) {
+	anyType := reflect.TypeOf((*any)(nil)).Elem()
+	m := ArgThat(func(s string) bool { return strings.HasPrefix(s, "a") })
+
+	// Simulate an `any`-typed parameter carrying an int at runtime: the
+	// dispatcher hands matchArg a reflect.Value whose Kind is Interface.
+	anyArg := reflect.New(anyType).Elem()
+	anyArg.Set(reflect.ValueOf(123))
+	if m.matchArg(anyArg) {
+		t.Error("ArgThat(string) on any-param carrying int should not match")
+	}
+
+	// Custom struct — not convertible to string either. The old Convert
+	// path would panic here.
+	type weird struct{ v int }
+	anyArg2 := reflect.New(anyType).Elem()
+	anyArg2.Set(reflect.ValueOf(weird{v: 1}))
+	if m.matchArg(anyArg2) {
+		t.Error("ArgThat(string) on any-param carrying weird struct should not match")
+	}
+}
+
+// When the runtime dynamic type inside an interface-typed parameter IS
+// assignable to the predicate's T, the predicate runs and its result
+// drives the match decision.
+func TestArgThat_InterfaceParam_RightDynamicType(t *testing.T) {
+	anyType := reflect.TypeOf((*any)(nil)).Elem()
+	m := ArgThat(func(s string) bool { return strings.HasPrefix(s, "a") })
+
+	anyArg := reflect.New(anyType).Elem()
+	anyArg.Set(reflect.ValueOf("alice"))
+	if !m.matchArg(anyArg) {
+		t.Error("ArgThat(string) on any-param carrying 'alice' should match")
+	}
+
+	anyArg2 := reflect.New(anyType).Elem()
+	anyArg2.Set(reflect.ValueOf("bob"))
+	if m.matchArg(anyArg2) {
+		t.Error("ArgThat(string) on any-param carrying 'bob' should not match (predicate returns false)")
+	}
+}
+
+// Nil interface values produce a zero reflect.Value after Elem — the
+// matcher reports no-match rather than invoking the predicate with an
+// invalid value.
+func TestArgThat_NilInterfaceValue(t *testing.T) {
+	anyType := reflect.TypeOf((*any)(nil)).Elem()
+	m := ArgThat(func(s string) bool { return true })
+
+	nilArg := reflect.New(anyType).Elem() // zero interface value
+	if m.matchArg(nilArg) {
+		t.Error("ArgThat on nil interface arg should not match")
+	}
+}
+
 func TestArgMatchers_ParamType(t *testing.T) {
 	if Any().paramType() != nil {
 		t.Error("Any() should have no paramType constraint")
