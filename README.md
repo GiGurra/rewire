@@ -181,6 +181,7 @@ e.OnAny().Returns("hi other")
 
 - **First-fit matching** — rules are walked in declaration order, first match wins.
 - **Typed predicates** — `.Match(func(...))` takes a real Go function, fully type-checked.
+- **Per-argument matchers** — mix literals and sentinels inside `.On(...)`: `expect.Any()` for "don't care", `expect.Eq(v)` for explicit equality, `expect.ArgThat(func(T) bool)` for a single-arg predicate.
 - **Call-count bounds** — `.Times(n)`, `.AtLeast(n)`, `.Never()`, `.Maybe()`. The default for `.On` and `.Match` is `.AtLeast(1)` — so "was this mock actually called?" verification is free.
 - **Async support** — `.Wait(n, timeout)` blocks until the rule has matched n times, for tests involving background goroutines.
 - **Spy-friendly** — `.DoFunc(func(...))` runs arbitrary code on each call, useful for capturing arguments or delegating to the real implementation.

@@ -201,9 +201,19 @@ func (e *Expectation[F]) AllowUnmatched() *Expectation[F] {
 
 // On begins a new rule that matches calls whose arguments are deeply
 // equal to the provided values. The number and types of args must
-// match the target's signature, checked at registration time. Returns
-// a *Rule so the caller can specify .Returns(...) / .DoFunc(...) and
-// optional bounds like .Times(n).
+// match the target's signature, checked at registration time.
+//
+// Per-position matcher sentinels are accepted alongside literal values:
+// pass Any() to skip a position, Eq(v) for explicit literal equality
+// (identical in effect to passing v directly), or ArgThat(pred) to use
+// a user predicate for a single argument.
+//
+//	e.On("alice").Returns(...)                         // literal
+//	e.On(Any(), Any(), "vat-1").Returns(...)           // any receiver+ctx
+//	e.On(Any(), ArgThat(func(s string) bool {...}))    // predicate on one arg
+//
+// Returns a *Rule so the caller can specify .Returns(...) / .DoFunc(...)
+// and optional bounds like .Times(n).
 //
 // Defaults to strict: the rule must match at least one call, or
 // verification fails at t.Cleanup. Override with .Maybe() for optional.
@@ -213,18 +223,22 @@ func (e *Expectation[F]) On(args ...any) *Rule[F] {
 		e.t.Fatalf("rewire/expect: %s: %s", e.name, err)
 		return nil
 	}
-	literals := make([]reflect.Value, len(args))
+	entries := make([]argEntry, len(args))
 	for i, a := range args {
-		if a == nil {
-			literals[i] = reflect.Zero(e.fnType.In(i))
-		} else {
-			literals[i] = reflect.ValueOf(a)
+		if m, ok := a.(ArgMatcher); ok {
+			entries[i] = argEntry{matcher: m}
+			continue
 		}
+		if a == nil {
+			entries[i] = argEntry{literal: reflect.Zero(e.fnType.In(i))}
+			continue
+		}
+		entries[i] = argEntry{literal: reflect.ValueOf(a)}
 	}
 	descr := ".On(" + formatArgsInterface(args) + ")"
 	r := &Rule[F]{
 		parent:  e,
-		matcher: &literalMatcher{args: literals, descr: descr},
+		matcher: &literalMatcher{entries: entries, descr: descr},
 		bound:   bound{kind: boundAtLeast, n: 1}, // strict default
 		site:    callerSite(2),
 	}
