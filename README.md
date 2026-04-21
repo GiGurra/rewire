@@ -192,7 +192,7 @@ The same DSL works on per-instance and interface mocks via `expect.ForInstance(t
 greeter := rewire.NewMock[bar.GreeterIface](t)
 
 e := expect.ForInstance(t, greeter, bar.GreeterIface.Greet)
-e.On(greeter, "Alice").Returns("hi Alice")
+e.On("Alice").Returns("hi Alice")   // receiver is pinned, not passed
 e.OnAny().Returns("hi other")
 ```
 

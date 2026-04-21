@@ -275,6 +275,59 @@ func TestValidateLiteralArgs_MixedLiteralAndMatcher(t *testing.T) {
 	}
 }
 
+// --- elided-receiver helpers ------------------------------------------------
+
+func TestElidedReceiverType_DropsFirstIn(t *testing.T) {
+	full := reflect.TypeOf(func(r string, a int, b bool) (int, error) { return 0, nil })
+	elided := elidedReceiverType(full)
+
+	if elided.NumIn() != 2 {
+		t.Fatalf("elided NumIn = %d, want 2", elided.NumIn())
+	}
+	if elided.In(0) != reflect.TypeOf(0) || elided.In(1) != reflect.TypeOf(true) {
+		t.Errorf("elided In types: got [%s, %s]", elided.In(0), elided.In(1))
+	}
+	if elided.NumOut() != 2 || elided.Out(0) != reflect.TypeOf(0) {
+		t.Errorf("elided Out: %v", elided)
+	}
+}
+
+func TestElidedReceiverType_Variadic(t *testing.T) {
+	full := reflect.TypeOf(func(r string, args ...int) {})
+	elided := elidedReceiverType(full)
+	if !elided.IsVariadic() {
+		t.Errorf("elided should remain variadic, got %v", elided)
+	}
+	if elided.NumIn() != 1 {
+		t.Fatalf("elided NumIn = %d", elided.NumIn())
+	}
+}
+
+// Wrapper should drop the first arg and forward the rest to the user
+// predicate.
+func TestWrapPredicateElideReceiver_DropsReceiver(t *testing.T) {
+	full := reflect.TypeOf(func(r string, n int) (int, error) { return 0, nil })
+	var seen int
+	userPred := func(n int) bool {
+		seen = n
+		return n > 10
+	}
+	wrapped := wrapPredicateElideReceiver(full, reflect.ValueOf(userPred))
+
+	// Call the wrapper with (receiver, 42). The user's predicate should
+	// see just (42) and return true.
+	results := wrapped.Call([]reflect.Value{
+		reflect.ValueOf("the-receiver"),
+		reflect.ValueOf(42),
+	})
+	if len(results) != 1 || !results[0].Bool() {
+		t.Errorf("expected wrapped predicate to return true, got %v", results)
+	}
+	if seen != 42 {
+		t.Errorf("user predicate saw %d, want 42", seen)
+	}
+}
+
 func TestValidatePredicate_RightShape(t *testing.T) {
 	fnType := reflect.TypeOf(func(a int, b string) string { return "" })
 	pred := func(a int, b string) bool { return true }
