@@ -45,6 +45,29 @@ Open questions (all serious):
 
 A fun experiment. Likely a separate subpackage (`rewire/live` or similar) if it ever happens, to keep the core test-focused API uncontaminated.
 
+### Expectation DSL — additional matchers and helpers
+
+The per-argument matcher set (`Any` / `Eq` / `ArgThat`) covers the common cases; a few more would round it out without pushing toward a full Mockito clone:
+
+- **`expect.Capture[T]()`** — sentinel that records the call's argument at that position into a user-provided slot. Useful when the value is constructed inside the system under test and needs to be inspected after the fact, without wiring a `.DoFunc` just for capture:
+
+  ```go
+  var got string
+  e.On(expect.Any(), expect.Capture(&got)).Returns(nil)
+  sut.DoThing(ctx, "computed-inside")
+  // got == "computed-inside"
+  ```
+
+  A multi-call variant (`Captures(&slice)`) captures every call's value into an append-only slot for ordered assertions.
+
+- **Matcher combinators** — `Not(m)`, `AnyOf(m1, m2, ...)`, `AllOf(m1, m2, ...)`. Compose `Any`, `Eq`, `ArgThat` without writing a whole predicate function.
+
+- **Common-case helpers** — `NotNil()`, `IsNil()`, `In(v1, v2, ...)` for set membership, `Regex(pattern)` / `Contains(substr)` / `HasPrefix(prefix)` for string args. Each is trivially implementable on top of `ArgThat`, but spelled out in the DSL they read better and centralise the reflect-type checking.
+
+- **Ordered verification across mocks** — a `verify.InOrder(...)` helper that asserts a set of calls happened in a specified sequence across multiple expectations. Today each expectation verifies its own bound independently; cross-mock ordering requires hand-rolled counters.
+
+The [non-goal on "a full Mockito-equivalent DSL"](#non-goals) still stands — we don't plan chained-stubbing-of-stubbing or deep mocks. These additions target the common 90% that currently forces `.DoFunc` or `.Match` as an escape hatch.
+
 ## Gaps we're not actively tackling
 
 These are more fundamental than the items above. We list them so expectations are clear, not because we're working on them.
@@ -72,7 +95,7 @@ Kept at the bottom of the page for reference. Each item links to its full featur
 - **[Method mocking, global](method-mocking.md)** — Go method expressions (`(*Type).Method` / `Type.Method`), no interface extraction required. Applies to every instance of the type.
 - **[Per-instance method mocks](method-mocking.md#per-instance-method-mocks)** — `rewire.InstanceFunc` scopes a method replacement to one receiver. Backed by a per-method `_ByInstance sync.Map` emitted on demand.
 - **[Interface mocks](interface-mocks.md)** — `rewire.NewMock[T]` synthesizes a backing struct at compile time. Handles non-generic and generic interfaces with arbitrary type-arg shapes (builtins, slices, maps, pointers, external-package types, nested generics), embedded interfaces (same-file, same-package, cross-package, generic embeds with type-parameter flow), bare same-package identifiers, and dot imports. Package resolution goes through `go list` so `replace` / `go.work` / vendor all work. No `go:generate`, no committed mock files.
-- **[Expectation DSL](expectations.md)** — `expect.For` / `expect.ForInstance` layer a fluent rule-builder on top of any rewire mock: literal matching (`.On`), typed predicates (`.Match`), catch-all (`.OnAny`), responses (`.Returns` / `.DoFunc`), call-count bounds (`.Times` / `.AtLeast` / `.Never` / `.Maybe`), async sync (`.Wait`). Automatic verification with source locations.
+- **[Expectation DSL](expectations.md)** — `expect.For` / `expect.ForInstance` layer a fluent rule-builder on top of any rewire mock: literal matching (`.On`), per-argument matcher sentinels (`Any`, `Eq`, `ArgThat`), typed predicates (`.Match`), catch-all (`.OnAny`), responses (`.Returns` / `.DoFunc`), call-count bounds (`.Times` / `.AtLeast` / `.Never` / `.Maybe`), async sync (`.Wait`). Automatic verification with source locations.
 - **[`rewire.Real`](function-mocking.md#spying-delegating-to-the-real-implementation)** — spy pattern: returns the pre-rewrite implementation so a mock closure can delegate to it. Works for functions, methods, and generics.
 - **`RestoreFunc` / `RestoreInstance` / `RestoreInstanceFunc`** — three dedicated mid-test cleanup verbs covering every scope (global func, all-on-receiver, one entry). Complement the automatic `t.Cleanup` teardown.
 - **Inlining compatibility (verified)** — the wrapper inlines into callers; `scripts/check-inlining.sh` in CI asserts the expected inlining decisions via `go build -gcflags=-m=2` so a future compiler or rewriter change can't silently regress the fast path.

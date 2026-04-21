@@ -126,6 +126,34 @@ e.On("Alice").Returns("hi Alice")
 e.On(42, "hello").Returns(true)   // for a func(int, string) bool target
 ```
 
+### Per-argument matchers — `Any()`, `Eq(v)`, `ArgThat(fn)`
+
+`.On(args...)` accepts per-position matcher sentinels mixed freely with literal values. Each position is evaluated independently: literals use `reflect.DeepEqual`, matchers use their own logic.
+
+| Matcher | Matches when |
+|---|---|
+| `expect.Any()` | any value at that position |
+| `expect.Eq(v)` | `reflect.DeepEqual(arg, v)` (same as passing `v` directly; useful for symmetry) |
+| `expect.ArgThat(func(T) bool)` | the predicate returns `true` for that single arg |
+
+```go
+// "Ignore receiver and context, match these two strings literally."
+e.On(expect.Any(), expect.Any(), "SE1234", "partner-42").Returns(store, nil)
+
+// "Accept any id > 100, any second arg."
+e.On(expect.ArgThat(func(id int) bool { return id > 100 }), expect.Any()).Returns(...)
+
+// Mix literals and matchers freely.
+e.On(42, expect.Any(), expect.Eq("prod")).Returns(...)
+```
+
+The matcher's parameter type (if it declares one) is checked against the target's parameter type at registration time — `ArgThat(func(int) bool)` at a `string` position fails with a clear error, same as any other `.On(...)` type mismatch. `Any()` imposes no type constraint.
+
+Compared to `.Match(predicate)`:
+
+- Prefer per-argument matchers when most positions are "don't care" and a few are literal equality — `.On(Any(), Any(), "vat", "partnerID")` reads more directly than the equivalent whole-signature predicate.
+- Prefer `.Match(predicate)` when the match is a relation across multiple args (`a < b`, `len(slice) > n`, etc.) — one predicate body expresses that more concisely than wiring the same state through several `ArgThat` closures.
+
 ### Typed predicate — `.Match(fn)`
 
 Matches calls for which the predicate returns `true`. The predicate is a normal Go function with the target's argument types and a `bool` return — **fully type-checked by Go's normal type inference**. Your IDE will autocomplete inside the predicate body.

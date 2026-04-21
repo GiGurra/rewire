@@ -455,3 +455,59 @@ func TestExpect_ChainDoFuncAndTimes(t *testing.T) {
 	}
 	_ = e
 }
+
+// Per-argument matchers: Any() accepts any value at a given position
+// while other positions match literally. Exercises the mixed-entry
+// path through the real dispatcher.
+func TestExpect_OnAnyAtPosition(t *testing.T) {
+	e := expect.For(t, bar.TinyAdd)
+	e.On(expect.Any(), 5).Returns(100)
+	e.OnAny().Returns(-1)
+
+	if got := bar.TinyAdd(1, 5); got != 100 {
+		t.Errorf("(any, 5): got %d, want %d", got, 100)
+	}
+	if got := bar.TinyAdd(999, 5); got != 100 {
+		t.Errorf("(any, 5): got %d, want %d", got, 100)
+	}
+	if got := bar.TinyAdd(1, 6); got != -1 {
+		t.Errorf("(_, 6) fell through to OnAny: got %d, want %d", got, -1)
+	}
+	_ = e
+}
+
+// Eq at a position is equivalent to passing the literal directly; both
+// rules match the same calls.
+func TestExpect_EqMatcher(t *testing.T) {
+	e := expect.For(t, bar.TinyAdd)
+	e.On(expect.Eq(2), expect.Eq(3)).Returns(42)
+	e.OnAny().Returns(-1)
+
+	if got := bar.TinyAdd(2, 3); got != 42 {
+		t.Errorf("Eq match: got %d, want %d", got, 42)
+	}
+	if got := bar.TinyAdd(2, 4); got != -1 {
+		t.Errorf("non-match fell through: got %d, want %d", got, -1)
+	}
+	_ = e
+}
+
+// ArgThat applies a per-argument predicate. Mixing with Any() at another
+// position keeps the unconstrained arg free while the predicate
+// disambiguates the other.
+func TestExpect_ArgThatMatcher(t *testing.T) {
+	e := expect.For(t, bar.TinyAdd)
+	e.On(expect.ArgThat(func(a int) bool { return a > 100 }), expect.Any()).Returns(999)
+	e.OnAny().Returns(-1)
+
+	if got := bar.TinyAdd(200, 5); got != 999 {
+		t.Errorf("ArgThat accepted: got %d, want %d", got, 999)
+	}
+	if got := bar.TinyAdd(200, 9999); got != 999 {
+		t.Errorf("ArgThat + Any() accepted: got %d, want %d", got, 999)
+	}
+	if got := bar.TinyAdd(5, 5); got != -1 {
+		t.Errorf("ArgThat rejected, fell through: got %d, want %d", got, -1)
+	}
+	_ = e
+}

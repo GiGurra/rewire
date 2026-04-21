@@ -13,21 +13,38 @@ type matcher interface {
 }
 
 // literalMatcher matches calls whose arguments are reflect.DeepEqual
-// to the stored values. Arguments are pre-converted to reflect.Value
-// at registration time, with the correct concrete types checked.
+// to the stored literal values, or (per position) accepted by an
+// ArgMatcher sentinel passed to .On(...). Entries are pre-built at
+// registration time so the match path doesn't re-interpret the args.
 type literalMatcher struct {
-	args  []reflect.Value
-	descr string
+	entries []argEntry
+	descr   string
+}
+
+// argEntry holds the per-position matching state. Exactly one of
+// `matcher` or the literal fields is used: if matcher != nil the
+// position uses per-arg matcher logic (Any / Eq / ArgThat), otherwise
+// the position compares via reflect.DeepEqual against literal.
+type argEntry struct {
+	matcher ArgMatcher
+	literal reflect.Value
 }
 
 func (m *literalMatcher) match(args []reflect.Value) bool {
-	if len(args) != len(m.args) {
+	if len(args) != len(m.entries) {
 		return false
 	}
 	for i := range args {
+		e := m.entries[i]
+		if e.matcher != nil {
+			if !e.matcher.matchArg(args[i]) {
+				return false
+			}
+			continue
+		}
 		var expected any
-		if m.args[i].IsValid() {
-			expected = m.args[i].Interface()
+		if e.literal.IsValid() {
+			expected = e.literal.Interface()
 		}
 		var actual any
 		if args[i].IsValid() {
@@ -97,7 +114,9 @@ func (r *funcResponse) produce(args []reflect.Value, fnType reflect.Type) []refl
 
 // validateLiteralArgs checks that the supplied args match the target's
 // argument list in count and types, and that nil is only used for
-// nilable parameter types.
+// nilable parameter types. ArgMatcher sentinels (Any, Eq, ArgThat) are
+// accepted at any position — their paramType() is checked against the
+// parameter type when it declares one.
 func validateLiteralArgs(fnType reflect.Type, args []any) error {
 	want := fnType.NumIn()
 	if fnType.IsVariadic() {
@@ -112,6 +131,20 @@ func validateLiteralArgs(fnType reflect.Type, args []any) error {
 	}
 	for i, a := range args {
 		paramType := paramTypeAt(fnType, i)
+		if m, ok := a.(ArgMatcher); ok {
+			if at, ok := m.(argThatArg); ok && !at.pred.IsValid() {
+				return fmt.Errorf("On() arg %d: ArgThat predicate is nil", i)
+			}
+			mt := m.paramType()
+			if mt == nil {
+				continue
+			}
+			if !mt.AssignableTo(paramType) {
+				return fmt.Errorf("On() arg %d %s: type %s is not assignable to parameter %d type %s",
+					i, m.describeArg(), mt, i, paramType)
+			}
+			continue
+		}
 		if a == nil {
 			if !isNilable(paramType) {
 				return fmt.Errorf("On() arg %d is nil, but parameter %d type %s is not nilable",
@@ -216,10 +249,17 @@ func convertReturnValues(fnType reflect.Type, values []any) ([]reflect.Value, er
 }
 
 // formatArgsInterface renders an []any as a human-readable comma list
-// for error messages and rule descriptions.
+// for error messages and rule descriptions. ArgMatcher sentinels are
+// rendered via their describeArg() so descriptions read as e.g.
+// `.On(Any(), "foo", ArgThat(func(int) bool))` rather than internal
+// struct field dumps.
 func formatArgsInterface(args []any) string {
 	parts := make([]string, len(args))
 	for i, a := range args {
+		if m, ok := a.(ArgMatcher); ok {
+			parts[i] = m.describeArg()
+			continue
+		}
 		parts[i] = fmt.Sprintf("%#v", a)
 	}
 	return strings.Join(parts, ", ")

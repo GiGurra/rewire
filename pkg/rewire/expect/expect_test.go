@@ -18,7 +18,7 @@ import (
 
 func TestLiteralMatcher_EqualValues(t *testing.T) {
 	m := &literalMatcher{
-		args: []reflect.Value{reflect.ValueOf("alice")},
+		entries: []argEntry{{literal: reflect.ValueOf("alice")}},
 	}
 	if !m.match([]reflect.Value{reflect.ValueOf("alice")}) {
 		t.Error("expected literal matcher to match equal values")
@@ -30,10 +30,134 @@ func TestLiteralMatcher_EqualValues(t *testing.T) {
 
 func TestLiteralMatcher_DifferentArgCount(t *testing.T) {
 	m := &literalMatcher{
-		args: []reflect.Value{reflect.ValueOf("alice")},
+		entries: []argEntry{{literal: reflect.ValueOf("alice")}},
 	}
 	if m.match([]reflect.Value{reflect.ValueOf("alice"), reflect.ValueOf(42)}) {
 		t.Error("expected literal matcher to reject mismatched arg count")
+	}
+}
+
+func TestLiteralMatcher_AnySentinel(t *testing.T) {
+	m := &literalMatcher{
+		entries: []argEntry{
+			{matcher: Any()},
+			{literal: reflect.ValueOf("bob")},
+		},
+	}
+	if !m.match([]reflect.Value{reflect.ValueOf("alice"), reflect.ValueOf("bob")}) {
+		t.Error("expected Any() to accept any value at position 0 while position 1 matches literally")
+	}
+	if m.match([]reflect.Value{reflect.ValueOf("alice"), reflect.ValueOf("other")}) {
+		t.Error("expected position 1 literal mismatch to reject the call")
+	}
+}
+
+func TestLiteralMatcher_EqSentinel(t *testing.T) {
+	m := &literalMatcher{
+		entries: []argEntry{{matcher: Eq("alice")}},
+	}
+	if !m.match([]reflect.Value{reflect.ValueOf("alice")}) {
+		t.Error("expected Eq to match equal value")
+	}
+	if m.match([]reflect.Value{reflect.ValueOf("bob")}) {
+		t.Error("expected Eq to reject unequal value")
+	}
+}
+
+func TestLiteralMatcher_ArgThatSentinel(t *testing.T) {
+	m := &literalMatcher{
+		entries: []argEntry{
+			{matcher: ArgThat(func(s string) bool { return strings.HasPrefix(s, "a") })},
+		},
+	}
+	if !m.match([]reflect.Value{reflect.ValueOf("alice")}) {
+		t.Error("expected ArgThat to accept 'alice'")
+	}
+	if m.match([]reflect.Value{reflect.ValueOf("bob")}) {
+		t.Error("expected ArgThat to reject 'bob'")
+	}
+}
+
+// Registration permits ArgThat[string] at an `any` parameter position
+// (string is assignable to any). At runtime the concrete dynamic type
+// may be something other than string — the predicate simply doesn't
+// apply, and we must report no-match rather than panic or coerce.
+func TestArgThat_InterfaceParam_WrongDynamicType(t *testing.T) {
+	anyType := reflect.TypeOf((*any)(nil)).Elem()
+	m := ArgThat(func(s string) bool { return strings.HasPrefix(s, "a") })
+
+	// Simulate an `any`-typed parameter carrying an int at runtime: the
+	// dispatcher hands matchArg a reflect.Value whose Kind is Interface.
+	anyArg := reflect.New(anyType).Elem()
+	anyArg.Set(reflect.ValueOf(123))
+	if m.matchArg(anyArg) {
+		t.Error("ArgThat(string) on any-param carrying int should not match")
+	}
+
+	// Custom struct — not convertible to string either. The old Convert
+	// path would panic here.
+	type weird struct{ v int }
+	anyArg2 := reflect.New(anyType).Elem()
+	anyArg2.Set(reflect.ValueOf(weird{v: 1}))
+	if m.matchArg(anyArg2) {
+		t.Error("ArgThat(string) on any-param carrying weird struct should not match")
+	}
+}
+
+// When the runtime dynamic type inside an interface-typed parameter IS
+// assignable to the predicate's T, the predicate runs and its result
+// drives the match decision.
+func TestArgThat_InterfaceParam_RightDynamicType(t *testing.T) {
+	anyType := reflect.TypeOf((*any)(nil)).Elem()
+	m := ArgThat(func(s string) bool { return strings.HasPrefix(s, "a") })
+
+	anyArg := reflect.New(anyType).Elem()
+	anyArg.Set(reflect.ValueOf("alice"))
+	if !m.matchArg(anyArg) {
+		t.Error("ArgThat(string) on any-param carrying 'alice' should match")
+	}
+
+	anyArg2 := reflect.New(anyType).Elem()
+	anyArg2.Set(reflect.ValueOf("bob"))
+	if m.matchArg(anyArg2) {
+		t.Error("ArgThat(string) on any-param carrying 'bob' should not match (predicate returns false)")
+	}
+}
+
+// Nil interface values produce a zero reflect.Value after Elem — the
+// matcher reports no-match rather than invoking the predicate with an
+// invalid value.
+func TestArgThat_NilInterfaceValue(t *testing.T) {
+	anyType := reflect.TypeOf((*any)(nil)).Elem()
+	m := ArgThat(func(s string) bool { return true })
+
+	nilArg := reflect.New(anyType).Elem() // zero interface value
+	if m.matchArg(nilArg) {
+		t.Error("ArgThat on nil interface arg should not match")
+	}
+}
+
+func TestArgMatchers_ParamType(t *testing.T) {
+	if Any().paramType() != nil {
+		t.Error("Any() should have no paramType constraint")
+	}
+	if got, want := Eq("x").paramType(), reflect.TypeOf(""); got != want {
+		t.Errorf("Eq(string).paramType() = %v, want %v", got, want)
+	}
+	if got, want := ArgThat(func(i int) bool { return true }).paramType(), reflect.TypeOf(0); got != want {
+		t.Errorf("ArgThat(int).paramType() = %v, want %v", got, want)
+	}
+}
+
+func TestArgMatchers_Describe(t *testing.T) {
+	if Any().describeArg() != "Any()" {
+		t.Errorf("Any() describe = %q", Any().describeArg())
+	}
+	if got := Eq("hi").describeArg(); got != `Eq("hi")` {
+		t.Errorf("Eq describe = %q", got)
+	}
+	if got := ArgThat(func(s string) bool { return true }).describeArg(); got != "ArgThat(func(string) bool)" {
+		t.Errorf("ArgThat describe = %q", got)
 	}
 }
 
@@ -95,6 +219,59 @@ func TestValidateLiteralArgs_NilForNonNilable(t *testing.T) {
 	err := validateLiteralArgs(fnType, []any{nil})
 	if err == nil || !strings.Contains(err.Error(), "not nilable") {
 		t.Errorf("expected non-nilable error, got %v", err)
+	}
+}
+
+func TestValidateLiteralArgs_AnyAccepted(t *testing.T) {
+	fnType := reflect.TypeOf(func(a int, b string) {})
+	if err := validateLiteralArgs(fnType, []any{Any(), Any()}); err != nil {
+		t.Errorf("expected Any() to be accepted for any position, got %v", err)
+	}
+}
+
+func TestValidateLiteralArgs_EqTypeMatches(t *testing.T) {
+	fnType := reflect.TypeOf(func(a int) {})
+	if err := validateLiteralArgs(fnType, []any{Eq(42)}); err != nil {
+		t.Errorf("expected Eq(int) to pass int-param check, got %v", err)
+	}
+}
+
+func TestValidateLiteralArgs_EqTypeMismatch(t *testing.T) {
+	fnType := reflect.TypeOf(func(a int) {})
+	err := validateLiteralArgs(fnType, []any{Eq("not an int")})
+	if err == nil || !strings.Contains(err.Error(), "not assignable") {
+		t.Errorf("expected Eq type mismatch error, got %v", err)
+	}
+}
+
+func TestValidateLiteralArgs_ArgThatTypeMatches(t *testing.T) {
+	fnType := reflect.TypeOf(func(a string) {})
+	if err := validateLiteralArgs(fnType, []any{ArgThat(func(s string) bool { return true })}); err != nil {
+		t.Errorf("expected ArgThat(string) to pass string-param check, got %v", err)
+	}
+}
+
+func TestValidateLiteralArgs_ArgThatTypeMismatch(t *testing.T) {
+	fnType := reflect.TypeOf(func(a string) {})
+	err := validateLiteralArgs(fnType, []any{ArgThat(func(i int) bool { return true })})
+	if err == nil || !strings.Contains(err.Error(), "not assignable") {
+		t.Errorf("expected ArgThat type mismatch error, got %v", err)
+	}
+}
+
+func TestValidateLiteralArgs_ArgThatNilPredicate(t *testing.T) {
+	fnType := reflect.TypeOf(func(a string) {})
+	err := validateLiteralArgs(fnType, []any{ArgThat[string](nil)})
+	if err == nil || !strings.Contains(err.Error(), "ArgThat predicate is nil") {
+		t.Errorf("expected nil-predicate error, got %v", err)
+	}
+}
+
+func TestValidateLiteralArgs_MixedLiteralAndMatcher(t *testing.T) {
+	fnType := reflect.TypeOf(func(a int, b string, c int) {})
+	// Literal at 0, Any at 1, Eq at 2.
+	if err := validateLiteralArgs(fnType, []any{1, Any(), Eq(3)}); err != nil {
+		t.Errorf("expected mixed literal+matcher to validate, got %v", err)
 	}
 }
 
