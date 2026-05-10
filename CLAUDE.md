@@ -16,7 +16,7 @@ Inspired by Erlang's meck.
 go build ./...
 
 # Install the binary (needed before toolexec can work)
-go install ./cmd/rewire/
+go install .
 
 # Run all tests with toolexec (separate cache avoids conflicts with go build)
 GOFLAGS="-toolexec=rewire" GOCACHE="$HOME/.cache/rewire-test" go test ./...
@@ -34,11 +34,13 @@ go test ./internal/toolexec/ -count=1
 go generate ./...
 ```
 
-After changing rewire source: always `go install ./cmd/rewire/` before running tests with toolexec.
+After changing rewire source: always `go install .` before running tests with toolexec.
 
 ## Project structure
 
-- `cmd/rewire/main.go` — Entry point. Detects toolexec mode (first arg is absolute path to a Go tool) vs CLI subcommand mode. Uses boa (github.com/GiGurra/boa) for CLI. The only CLI subcommand is `rewrite`, a debug helper that prints what the rewriter would do to a single file. Interface mock generation is purely toolexec-driven via `rewire.NewMock[T]` references in test files — there is no separate CLI invocation for it.
+- `main.go` — Root entrypoint shim so `go install github.com/GiGurra/rewire@latest` works directly. Two-line wrapper around `internal/cli.Run`.
+- `cmd/rewire/main.go` — Legacy entrypoint shim kept for backwards compatibility with `go install github.com/GiGurra/rewire/cmd/rewire@latest`. Same two-line wrapper around `internal/cli.Run`.
+- `internal/cli/cli.go` — Actual entrypoint logic. Detects toolexec mode (first arg is absolute path to a Go tool) vs CLI subcommand mode. The only CLI subcommand is `rewrite`, a debug helper that prints what the rewriter would do to a single file. Interface mock generation is purely toolexec-driven via `rewire.NewMock[T]` references in test files — there is no separate CLI invocation for it.
 - `pkg/rewire/rewire.go` — The public test API:
   - `Func[F any](t, original, replacement)` — replace a function or method (per-instantiation for generics).
   - `NewMock[I any](t)` — return a fresh mock instance of interface I. Triggers compile-time backing-struct synthesis for I via toolexec.

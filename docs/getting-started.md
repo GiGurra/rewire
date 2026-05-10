@@ -6,7 +6,7 @@ You need two things: the rewire binary (for toolexec and mock generation) and th
 
 ```bash
 # Install the rewire binary
-go install github.com/GiGurra/rewire/cmd/rewire@latest
+go install github.com/GiGurra/rewire@latest
 
 # Add the test library to your module
 go get github.com/GiGurra/rewire/pkg/rewire
